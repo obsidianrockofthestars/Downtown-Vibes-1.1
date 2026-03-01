@@ -11,6 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import * as Location from 'expo-location';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { Business } from '@/lib/types';
@@ -30,6 +31,7 @@ export default function LoginScreen() {
   const [menuLink, setMenuLink] = useState('');
   const [website, setWebsite] = useState('');
   const [saving, setSaving] = useState(false);
+  const [isUpdatingLocation, setIsUpdatingLocation] = useState(false);
 
   useEffect(() => {
     if (!user) {
@@ -142,6 +144,49 @@ export default function LoginScreen() {
     }
   };
 
+  // ─── Update pin location handler ────────────────────────────
+  const handleUpdateLocation = async () => {
+    if (!ownedBusiness) return;
+
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert(
+        'Permission Denied',
+        'Location access is required to update your pin.'
+      );
+      return;
+    }
+
+    setIsUpdatingLocation(true);
+
+    try {
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { data, error } = await supabase
+        .from('businesses')
+        .update({
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+        })
+        .eq('id', ownedBusiness.id)
+        .select()
+        .single();
+
+      if (error) {
+        Alert.alert('Error', error.message);
+      } else if (data) {
+        setOwnedBusiness(data);
+        Alert.alert('Success', 'Your pin has been moved to your current location!');
+      }
+    } catch {
+      Alert.alert('Error', 'Failed to acquire GPS position.');
+    } finally {
+      setIsUpdatingLocation(false);
+    }
+  };
+
   // ─── Loading spinner ─────────────────────────────────────────
   if (loading) {
     return (
@@ -223,6 +268,23 @@ export default function LoginScreen() {
             />
             <Text style={styles.helperText}>Your business website or social page</Text>
           </View>
+
+          <TouchableOpacity
+            style={[
+              styles.locationBtn,
+              isUpdatingLocation && styles.btnDisabled,
+            ]}
+            onPress={handleUpdateLocation}
+            disabled={isUpdatingLocation}
+          >
+            {isUpdatingLocation ? (
+              <ActivityIndicator color="#FFF" />
+            ) : (
+              <Text style={styles.locationBtnText}>
+                📍 Update Pin to My Current Location
+              </Text>
+            )}
+          </TouchableOpacity>
 
           <TouchableOpacity
             style={[styles.saveBtn, saving && styles.btnDisabled]}
@@ -488,6 +550,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#9CA3AF',
     marginTop: 6,
+  },
+  locationBtn: {
+    backgroundColor: '#059669',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+    marginHorizontal: 20,
+    marginTop: 8,
+  },
+  locationBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
   },
   saveBtn: {
     backgroundColor: '#6C3AED',
