@@ -5,6 +5,10 @@ import {
   Text,
   ScrollView,
   TouchableOpacity,
+  Linking,
+  Animated,
+  Platform,
+  Alert,
 } from 'react-native';
 import MapView, { Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -55,9 +59,20 @@ export default function MapScreen() {
     name: string;
   } | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
+  const [selectedBusiness, setSelectedBusiness] = useState<Business | null>(null);
 
   const shownSalesRef = useRef<Set<string>>(new Set());
   const mapRef = useRef<MapView | null>(null);
+  const sheetAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.spring(sheetAnim, {
+      toValue: selectedBusiness ? 1 : 0,
+      useNativeDriver: true,
+      tension: 65,
+      friction: 11,
+    }).start();
+  }, [selectedBusiness]);
 
   // Fetch businesses from Supabase
   useEffect(() => {
@@ -112,13 +127,26 @@ export default function MapScreen() {
         biz.longitude
       );
 
-      if (dist < RADAR_RADIUS_MILES) {
+      if (dist <= RADAR_RADIUS_MILES) {
         shownSalesRef.current.add(biz.id);
         setFlashSale({ text: biz.flash_sale, name: biz.business_name });
         break;
       }
     }
   }, [userLocation, businesses]);
+
+  const handleOpenMenu = useCallback(async (url: string) => {
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (supported) {
+        await Linking.openURL(url);
+      } else {
+        Alert.alert('Error', 'Cannot open this link.');
+      }
+    } catch {
+      Alert.alert('Error', 'Invalid URL.');
+    }
+  }, []);
 
   const toggleFilter = useCallback((category: string) => {
     setActiveFilters((prev) =>
@@ -155,24 +183,36 @@ export default function MapScreen() {
         }}
         showsUserLocation
         showsMyLocationButton
+        onPress={() => setSelectedBusiness(null)}
       >
         <UrlTile
           urlTemplate="https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
           maximumZ={19}
           flipY={false}
         />
-        {filteredBusinesses.map((biz) => (
-          <Marker
-            key={biz.id}
-            coordinate={{
-              latitude: biz.latitude,
-              longitude: biz.longitude,
-            }}
-            title={biz.business_name}
-            description={biz.flash_sale ?? biz.history_fact}
-            pinColor={getPinColor(biz.business_type)}
-          />
-        ))}
+        {filteredBusinesses.map((biz) => {
+          const hasEmoji = !!biz.emoji_icon?.trim();
+          return (
+            <Marker
+              key={biz.id}
+              coordinate={{
+                latitude: biz.latitude,
+                longitude: biz.longitude,
+              }}
+              pinColor={hasEmoji ? undefined : getPinColor(biz.business_type)}
+              onPress={(e) => {
+                e.stopPropagation();
+                setSelectedBusiness(biz);
+              }}
+            >
+              {hasEmoji && (
+                <View style={styles.emojiBadge}>
+                  <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
+                </View>
+              )}
+            </Marker>
+          );
+        })}
       </MapView>
 
       {/* Search + Filter Chips overlay */}
@@ -227,6 +267,64 @@ export default function MapScreen() {
         sale={flashSale}
         onDismiss={() => setFlashSale(null)}
       />
+
+      {selectedBusiness && (
+        <View style={styles.sheetWrapper} pointerEvents="box-none">
+          <Animated.View
+            style={[
+              styles.sheet,
+              {
+                transform: [
+                  {
+                    translateY: sheetAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [300, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            <TouchableOpacity
+              style={styles.sheetClose}
+              onPress={() => setSelectedBusiness(null)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Text style={styles.sheetCloseText}>✕</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.sheetName}>
+              {selectedBusiness.business_name}
+            </Text>
+
+            {selectedBusiness.flash_sale ? (
+              <Text style={styles.sheetSale}>
+                🔥 {selectedBusiness.flash_sale}
+              </Text>
+            ) : null}
+
+            {selectedBusiness.history_fact ? (
+              <Text style={styles.sheetFact}>
+                {selectedBusiness.history_fact}
+              </Text>
+            ) : (
+              <Text style={styles.sheetType}>
+                {selectedBusiness.business_type}
+              </Text>
+            )}
+
+            {selectedBusiness.menu_link?.startsWith('http') ? (
+              <TouchableOpacity
+                style={styles.sheetButton}
+                activeOpacity={0.8}
+                onPress={() => handleOpenMenu(selectedBusiness.menu_link!)}
+              >
+                <Text style={styles.sheetButtonText}>View Menu</Text>
+              </TouchableOpacity>
+            ) : null}
+          </Animated.View>
+        </View>
+      )}
     </View>
   );
 }
@@ -289,5 +387,101 @@ const styles = StyleSheet.create({
     color: '#92400E',
     fontWeight: '600',
     fontSize: 13,
+  },
+  emojiBadge: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#6C3AED',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  emojiBadgeText: {
+    fontSize: 22,
+    lineHeight: 28,
+  },
+  sheetWrapper: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 999,
+    elevation: 999,
+  },
+  sheet: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 36,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 10,
+    zIndex: 999,
+  },
+  sheetClose: {
+    position: 'absolute',
+    top: 16,
+    right: 20,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F3F4F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetCloseText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#6B7280',
+  },
+  sheetName: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#111827',
+    marginBottom: 6,
+    paddingRight: 40,
+  },
+  sheetSale: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#DC2626',
+    marginBottom: 4,
+  },
+  sheetFact: {
+    fontSize: 14,
+    color: '#4B5563',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  sheetType: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#9CA3AF',
+    textTransform: 'capitalize',
+    marginBottom: 12,
+  },
+  sheetButton: {
+    marginTop: 8,
+    backgroundColor: '#6C3AED',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  sheetButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
 });

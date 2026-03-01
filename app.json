@@ -33,7 +33,8 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION"
-      ]
+      ],
+      "package": "com.anonymous.Vibeathon"
     },
     "web": {
       "bundler": "metro",
