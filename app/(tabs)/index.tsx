@@ -6,19 +6,19 @@ import {
   ScrollView,
   TouchableOpacity,
   Linking,
-  Animated,
-  Platform,
   Alert,
 } from 'react-native';
 import MapView, { Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
+import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import { supabase } from '@/lib/supabase';
 import { Business } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
 import { SearchBar } from '@/components/SearchBar';
-import { FlashSaleBanner } from '@/components/FlashSaleBanner';
+import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
 
 const RADAR_RADIUS_MILES = 0.25;
+const BBOX_DEGREES = 0.004;
 
 const CATEGORIES = ['restaurant', 'bar', 'store'] as const;
 
@@ -54,27 +54,26 @@ export default function MapScreen() {
     'bar',
     'store',
   ]);
-  const [flashSale, setFlashSale] = useState<{
-    text: string;
-    name: string;
-  } | null>(null);
+  const [nearbySales, setNearbySales] = useState<NearbySale[]>([]);
+  const [saleFilterIds, setSaleFilterIds] = useState<string[] | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
-  const [selectedBusiness, setSelectedBusiness] = useState<Business | null>(null);
+  const [selectedBusiness, setSelectedBusiness] = useState<Business | null>(
+    null
+  );
 
   const shownSalesRef = useRef<Set<string>>(new Set());
   const mapRef = useRef<MapView | null>(null);
-  const sheetAnim = useRef(new Animated.Value(0)).current;
+  const bottomSheetRef = useRef<BottomSheet>(null);
+  const snapPoints = useMemo(() => ['35%'], []);
 
   useEffect(() => {
-    Animated.spring(sheetAnim, {
-      toValue: selectedBusiness ? 1 : 0,
-      useNativeDriver: true,
-      tension: 65,
-      friction: 11,
-    }).start();
+    if (selectedBusiness) {
+      bottomSheetRef.current?.snapToIndex(0);
+    } else {
+      bottomSheetRef.current?.close();
+    }
   }, [selectedBusiness]);
 
-  // Fetch businesses from Supabase
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
@@ -86,7 +85,6 @@ export default function MapScreen() {
     })();
   }, []);
 
-  // Watch user location
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
 
@@ -113,12 +111,18 @@ export default function MapScreen() {
     };
   }, []);
 
-  // Radar: flash sale proximity check
+  // Radar: flash sale proximity check with bounding box pre-filter
   useEffect(() => {
     if (!userLocation) return;
 
+    const found: NearbySale[] = [];
+
     for (const biz of businesses) {
       if (!biz.flash_sale || shownSalesRef.current.has(biz.id)) continue;
+
+      const dLat = Math.abs(biz.latitude - userLocation.latitude);
+      const dLon = Math.abs(biz.longitude - userLocation.longitude);
+      if (dLat > BBOX_DEGREES || dLon > BBOX_DEGREES) continue;
 
       const dist = haversineDistance(
         userLocation.latitude,
@@ -129,9 +133,16 @@ export default function MapScreen() {
 
       if (dist <= RADAR_RADIUS_MILES) {
         shownSalesRef.current.add(biz.id);
-        setFlashSale({ text: biz.flash_sale, name: biz.business_name });
-        break;
+        found.push({
+          id: biz.id,
+          text: biz.flash_sale,
+          name: biz.business_name,
+        });
       }
+    }
+
+    if (found.length > 0) {
+      setNearbySales((prev) => [...prev, ...found]);
     }
   }, [userLocation, businesses]);
 
@@ -156,8 +167,21 @@ export default function MapScreen() {
     );
   }, []);
 
-  // Unified filter: active chips + search query, all lowercase
+  const handleDismissBanner = useCallback(() => {
+    setNearbySales([]);
+    setSaleFilterIds(null);
+  }, []);
+
+  const handleShowSales = useCallback(() => {
+    const ids = nearbySales.map((s) => s.id);
+    setSaleFilterIds(ids);
+  }, [nearbySales]);
+
   const filteredBusinesses = useMemo(() => {
+    if (saleFilterIds) {
+      return businesses.filter((b) => saleFilterIds.includes(b.id));
+    }
+
     const q = searchQuery.trim().toLowerCase();
 
     return businesses.filter((b) => {
@@ -168,7 +192,7 @@ export default function MapScreen() {
       if (q) return name.includes(q) || type.includes(q);
       return true;
     });
-  }, [businesses, activeFilters, searchQuery]);
+  }, [businesses, activeFilters, searchQuery, saleFilterIds]);
 
   return (
     <View style={styles.container}>
@@ -224,6 +248,17 @@ export default function MapScreen() {
           contentContainerStyle={styles.chipRow}
           style={styles.chipScroll}
         >
+          {saleFilterIds && (
+            <TouchableOpacity
+              onPress={() => setSaleFilterIds(null)}
+              activeOpacity={0.7}
+              style={[styles.chip, { backgroundColor: '#DC2626' }]}
+            >
+              <Text style={[styles.chipText, { color: '#FFFFFF' }]}>
+                ✕ Clear Sale Filter
+              </Text>
+            </TouchableOpacity>
+          )}
           {CATEGORIES.map((cat) => {
             const active = activeFilters.includes(cat);
             const colors = CHIP_COLORS[cat];
@@ -264,67 +299,56 @@ export default function MapScreen() {
       )}
 
       <FlashSaleBanner
-        sale={flashSale}
-        onDismiss={() => setFlashSale(null)}
+        sales={nearbySales}
+        onDismiss={handleDismissBanner}
+        onShowSales={handleShowSales}
       />
 
-      {selectedBusiness && (
-        <View style={styles.sheetWrapper} pointerEvents="box-none">
-          <Animated.View
-            style={[
-              styles.sheet,
-              {
-                transform: [
-                  {
-                    translateY: sheetAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [300, 0],
-                    }),
-                  },
-                ],
-              },
-            ]}
-          >
-            <TouchableOpacity
-              style={styles.sheetClose}
-              onPress={() => setSelectedBusiness(null)}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-            >
-              <Text style={styles.sheetCloseText}>✕</Text>
-            </TouchableOpacity>
-
-            <Text style={styles.sheetName}>
-              {selectedBusiness.business_name}
-            </Text>
-
-            {selectedBusiness.flash_sale ? (
-              <Text style={styles.sheetSale}>
-                🔥 {selectedBusiness.flash_sale}
+      <BottomSheet
+        ref={bottomSheetRef}
+        index={-1}
+        snapPoints={snapPoints}
+        enablePanDownToClose
+        onClose={() => setSelectedBusiness(null)}
+        backgroundStyle={styles.sheetBackground}
+        handleIndicatorStyle={styles.sheetHandle}
+      >
+        <BottomSheetView style={styles.sheetContent}>
+          {selectedBusiness && (
+            <>
+              <Text style={styles.sheetName}>
+                {selectedBusiness.business_name}
               </Text>
-            ) : null}
 
-            {selectedBusiness.history_fact ? (
-              <Text style={styles.sheetFact}>
-                {selectedBusiness.history_fact}
-              </Text>
-            ) : (
-              <Text style={styles.sheetType}>
-                {selectedBusiness.business_type}
-              </Text>
-            )}
+              {selectedBusiness.flash_sale ? (
+                <Text style={styles.sheetSale}>
+                  🔥 {selectedBusiness.flash_sale}
+                </Text>
+              ) : null}
 
-            {selectedBusiness.menu_link?.startsWith('http') ? (
-              <TouchableOpacity
-                style={styles.sheetButton}
-                activeOpacity={0.8}
-                onPress={() => handleOpenMenu(selectedBusiness.menu_link!)}
-              >
-                <Text style={styles.sheetButtonText}>View Menu</Text>
-              </TouchableOpacity>
-            ) : null}
-          </Animated.View>
-        </View>
-      )}
+              {selectedBusiness.history_fact ? (
+                <Text style={styles.sheetFact}>
+                  {selectedBusiness.history_fact}
+                </Text>
+              ) : (
+                <Text style={styles.sheetType}>
+                  {selectedBusiness.business_type}
+                </Text>
+              )}
+
+              {selectedBusiness.menu_link?.startsWith('http') ? (
+                <TouchableOpacity
+                  style={styles.sheetButton}
+                  activeOpacity={0.8}
+                  onPress={() => handleOpenMenu(selectedBusiness.menu_link!)}
+                >
+                  <Text style={styles.sheetButtonText}>View Menu</Text>
+                </TouchableOpacity>
+              ) : null}
+            </>
+          )}
+        </BottomSheetView>
+      </BottomSheet>
     </View>
   );
 }
@@ -407,50 +431,29 @@ const styles = StyleSheet.create({
     fontSize: 22,
     lineHeight: 28,
   },
-  sheetWrapper: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    zIndex: 999,
-    elevation: 999,
-  },
-  sheet: {
+  sheetBackground: {
     backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 36,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -4 },
     shadowOpacity: 0.15,
     shadowRadius: 12,
-    elevation: 10,
-    zIndex: 999,
+    elevation: 20,
   },
-  sheetClose: {
-    position: 'absolute',
-    top: 16,
-    right: 20,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
+  sheetHandle: {
+    backgroundColor: '#D1D5DB',
+    width: 40,
   },
-  sheetCloseText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#6B7280',
+  sheetContent: {
+    paddingHorizontal: 24,
+    paddingBottom: 36,
   },
   sheetName: {
     fontSize: 20,
     fontWeight: '800',
     color: '#111827',
     marginBottom: 6,
-    paddingRight: 40,
   },
   sheetSale: {
     fontSize: 15,

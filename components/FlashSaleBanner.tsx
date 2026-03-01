@@ -7,12 +7,23 @@ import {
   View,
 } from 'react-native';
 
-interface FlashSaleBannerProps {
-  sale: { text: string; name: string } | null;
-  onDismiss: () => void;
+export interface NearbySale {
+  id: string;
+  text: string;
+  name: string;
 }
 
-export function FlashSaleBanner({ sale, onDismiss }: FlashSaleBannerProps) {
+interface FlashSaleBannerProps {
+  sales: NearbySale[];
+  onDismiss: () => void;
+  onShowSales?: () => void;
+}
+
+export function FlashSaleBanner({
+  sales,
+  onDismiss,
+  onShowSales,
+}: FlashSaleBannerProps) {
   const translateY = useRef(new Animated.Value(-120)).current;
   const onDismissRef = useRef(onDismiss);
   onDismissRef.current = onDismiss;
@@ -26,7 +37,7 @@ export function FlashSaleBanner({ sale, onDismiss }: FlashSaleBannerProps) {
   }, [translateY]);
 
   useEffect(() => {
-    if (sale) {
+    if (sales.length > 0) {
       Animated.spring(translateY, {
         toValue: 0,
         useNativeDriver: true,
@@ -34,36 +45,55 @@ export function FlashSaleBanner({ sale, onDismiss }: FlashSaleBannerProps) {
         friction: 10,
       }).start();
 
-      const timer = setTimeout(dismiss, 6000);
+      const timer = setTimeout(dismiss, 8000);
       return () => clearTimeout(timer);
     } else {
       translateY.setValue(-120);
     }
-  }, [sale, dismiss]);
+  }, [sales, dismiss]);
 
-  if (!sale) return null;
+  if (sales.length === 0) return null;
+
+  const isSingle = sales.length === 1;
 
   return (
     <Animated.View
       style={[styles.container, { transform: [{ translateY }] }]}
     >
-      <View style={styles.content}>
+      <TouchableOpacity
+        style={styles.content}
+        activeOpacity={0.85}
+        onPress={isSingle ? dismiss : onShowSales}
+      >
         <Text style={styles.icon}>🔥</Text>
         <View style={styles.textWrap}>
-          <Text style={styles.title} numberOfLines={1}>
-            Hey, sale here!
-          </Text>
-          <Text style={styles.bizName} numberOfLines={1}>
-            {sale.name}
-          </Text>
-          <Text style={styles.details} numberOfLines={2}>
-            {sale.text}
-          </Text>
+          {isSingle ? (
+            <>
+              <Text style={styles.title} numberOfLines={1}>
+                Hey, sale here!
+              </Text>
+              <Text style={styles.bizName} numberOfLines={1}>
+                {sales[0].name}
+              </Text>
+              <Text style={styles.details} numberOfLines={2}>
+                {sales[0].text}
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.title} numberOfLines={1}>
+                {sales.length} Sales Near You!
+              </Text>
+              <Text style={styles.details} numberOfLines={1}>
+                Tap to see them on the map
+              </Text>
+            </>
+          )}
         </View>
         <TouchableOpacity onPress={dismiss} style={styles.closeBtn}>
           <Text style={styles.closeText}>✕</Text>
         </TouchableOpacity>
-      </View>
+      </TouchableOpacity>
     </Animated.View>
   );
 }
