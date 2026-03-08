@@ -17,8 +17,8 @@ import { haversineDistance } from '@/lib/haversine';
 import { SearchBar } from '@/components/SearchBar';
 import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
 
-const RADAR_RADIUS_MILES = 0.25;
-const BBOX_DEGREES = 0.004;
+const RADAR_RADIUS_MILES = 0.15;
+const BBOX_DEGREES = 0.0025;
 
 const CATEGORIES = ['restaurant', 'bar', 'store'] as const;
 
@@ -75,14 +75,29 @@ export default function MapScreen() {
   }, [selectedBusiness]);
 
   useEffect(() => {
-    (async () => {
+    const fetchBusinesses = async () => {
       const { data, error } = await supabase
         .from('businesses')
         .select('*')
         .eq('is_active', true);
       if (error) console.warn('Supabase fetch error:', error.message);
       if (data) setBusinesses(data);
-    })();
+    };
+
+    fetchBusinesses();
+
+    const channel = supabase
+      .channel('business-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'businesses' },
+        () => fetchBusinesses()
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   useEffect(() => {

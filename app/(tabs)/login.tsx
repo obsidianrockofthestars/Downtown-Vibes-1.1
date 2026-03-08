@@ -12,6 +12,7 @@ import {
   View,
 } from 'react-native';
 import * as Location from 'expo-location';
+import * as Crypto from 'expo-crypto';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { Business } from '@/lib/types';
@@ -32,34 +33,49 @@ export default function LoginScreen() {
   const [website, setWebsite] = useState('');
   const [saving, setSaving] = useState(false);
   const [isUpdatingLocation, setIsUpdatingLocation] = useState(false);
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [newBusinessName, setNewBusinessName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [isEditingDesc, setIsEditingDesc] = useState(false);
+  const [editDescText, setEditDescText] = useState('');
+
+  const fetchBusinessData = async (userId: string) => {
+    setBizLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('businesses')
+        .select('*')
+        .eq('owner_id', userId)
+        .limit(1)
+        .maybeSingle();
+
+      if (error) console.warn('Owner fetch error:', error.message);
+
+      if (data) {
+        setOwnedBusiness(data);
+        setFlashSale(data.flash_sale ?? '');
+        setEmojiIcon(data.emoji_icon ?? '');
+        setMenuLink(data.menu_link ?? '');
+        setWebsite(data.website ?? '');
+        setNeedsOnboarding(false);
+      } else {
+        setOwnedBusiness(null);
+        setNeedsOnboarding(true);
+      }
+    } catch (err) {
+      console.warn('Owner fetch exception:', err);
+    } finally {
+      setBizLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!user) {
       setOwnedBusiness(null);
+      setNeedsOnboarding(false);
       return;
     }
-
-    setBizLoading(true);
-    supabase
-      .from('businesses')
-      .select('*')
-      .eq('owner_id', user.id)
-      .limit(1)
-      .maybeSingle()
-      .then(({ data, error }) => {
-        if (error) console.warn('Owner fetch error:', error.message);
-        if (data) {
-          setOwnedBusiness(data);
-          setFlashSale(data.flash_sale ?? '');
-          setEmojiIcon(data.emoji_icon ?? '');
-          setMenuLink(data.menu_link ?? '');
-          setWebsite(data.website ?? '');
-        } else {
-          setOwnedBusiness(null);
-        }
-      })
-      .catch((err) => console.warn('Owner fetch exception:', err))
-      .finally(() => setBizLoading(false));
+    fetchBusinessData(user.id);
   }, [user]);
 
   // ─── Auth handlers ───────────────────────────────────────────
@@ -90,6 +106,38 @@ export default function LoginScreen() {
       Alert.alert('Sign Up Failed', error.message);
     } else {
       Alert.alert('Check Your Email', 'We sent you a confirmation link.');
+    }
+  };
+
+  // ─── Onboarding handler ─────────────────────────────────────
+  const handleCreateBusiness = async () => {
+    if (!user) return;
+    const name = newBusinessName.trim();
+    if (!name) {
+      Alert.alert('Missing Name', 'Enter your business name to continue.');
+      return;
+    }
+
+    setCreating(true);
+
+    const { error } = await supabase.from('businesses').insert({
+      id: Crypto.randomUUID(),
+      owner_id: user.id,
+      business_name: name,
+      business_type: 'store',
+      latitude: 39.7675,
+      longitude: -94.8467,
+      emoji_icon: '🏪',
+      is_active: true,
+    });
+
+    setCreating(false);
+
+    if (error) {
+      Alert.alert('Error', error.message);
+    } else {
+      setNewBusinessName('');
+      await fetchBusinessData(user.id);
     }
   };
 
@@ -141,6 +189,34 @@ export default function LoginScreen() {
       setMenuLink(data.menu_link ?? '');
       setWebsite(data.website ?? '');
       Alert.alert('Saved', 'Your business has been updated.');
+    }
+  };
+
+  // ─── Description update handler ─────────────────────────────
+  const handleUpdateDescription = async () => {
+    if (!ownedBusiness) return;
+    if (editDescText.length > 100) {
+      Alert.alert('Too Long', 'Description must be 100 characters or less.');
+      return;
+    }
+
+    setSaving(true);
+
+    const { data, error } = await supabase
+      .from('businesses')
+      .update({ description: editDescText.trim() || null })
+      .eq('id', ownedBusiness.id)
+      .select()
+      .single();
+
+    setSaving(false);
+
+    if (error) {
+      Alert.alert('Error', error.message);
+    } else if (data) {
+      setOwnedBusiness(data);
+      setIsEditingDesc(false);
+      Alert.alert('Saved', 'Description updated.');
     }
   };
 
@@ -212,6 +288,60 @@ export default function LoginScreen() {
             <Text style={styles.heading}>Owner Dashboard</Text>
             <Text style={styles.bizName}>{ownedBusiness.business_name}</Text>
             <Text style={styles.bizType}>{ownedBusiness.business_type}</Text>
+          </View>
+
+          <View style={styles.card}>
+            <Text style={styles.cardLabel}>Description</Text>
+            {isEditingDesc ? (
+              <>
+                <TextInput
+                  style={[styles.input, { minHeight: 60, textAlignVertical: 'top' }]}
+                  value={editDescText}
+                  onChangeText={setEditDescText}
+                  placeholder="Describe your business in a sentence..."
+                  placeholderTextColor="#9CA3AF"
+                  multiline
+                  maxLength={100}
+                />
+                <Text style={styles.charCounter}>
+                  {editDescText.length}/100
+                </Text>
+                <View style={styles.descBtnRow}>
+                  <TouchableOpacity
+                    style={[styles.descBtn, styles.descBtnSave, saving && styles.btnDisabled]}
+                    onPress={handleUpdateDescription}
+                    disabled={saving}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#FFF" size="small" />
+                    ) : (
+                      <Text style={styles.descBtnSaveText}>Save</Text>
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.descBtn, styles.descBtnCancel]}
+                    onPress={() => setIsEditingDesc(false)}
+                  >
+                    <Text style={styles.descBtnCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={styles.descText}>
+                  {ownedBusiness.description || 'No description yet.'}
+                </Text>
+                <TouchableOpacity
+                  style={styles.editDescBtn}
+                  onPress={() => {
+                    setEditDescText(ownedBusiness.description ?? '');
+                    setIsEditingDesc(true);
+                  }}
+                >
+                  <Text style={styles.editDescBtnText}>Edit Description</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
 
           <View style={styles.card}>
@@ -306,24 +436,63 @@ export default function LoginScreen() {
     );
   }
 
-  // ─── Logged-in: Non-owner ────────────────────────────────────
-  if (user) {
+  // ─── Logged-in: Onboarding ──────────────────────────────────
+  if (user && needsOnboarding) {
+    return (
+      <KeyboardAvoidingView
+        style={styles.container}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={styles.onboardingContent}
+          keyboardShouldPersistTaps="handled"
+        >
+          <Text style={styles.onboardingEmoji}>📍</Text>
+          <Text style={styles.onboardingTitle}>
+            Welcome! Let's get your business on the map.
+          </Text>
+          <Text style={styles.onboardingSubtext}>
+            Enter your business name below and we'll create your pin. You can
+            update your location, emoji, and details from the dashboard.
+          </Text>
+
+          <View style={styles.formCard}>
+            <Text style={styles.label}>Business Name</Text>
+            <TextInput
+              style={styles.input}
+              value={newBusinessName}
+              onChangeText={setNewBusinessName}
+              placeholder="e.g. Joe's Coffee Shop"
+              placeholderTextColor="#9CA3AF"
+              autoCapitalize="words"
+            />
+
+            <TouchableOpacity
+              style={[styles.primaryBtn, creating && styles.btnDisabled]}
+              onPress={handleCreateBusiness}
+              disabled={creating}
+            >
+              {creating ? (
+                <ActivityIndicator color="#FFF" />
+              ) : (
+                <Text style={styles.primaryBtnText}>Create My Business Pin</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
+            <Text style={styles.signOutText}>Sign Out</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  }
+
+  // ─── Logged-in: Loading ────────────────────────────────────
+  if (user && bizLoading) {
     return (
       <View style={styles.center}>
-        {bizLoading ? (
-          <ActivityIndicator size="large" color="#6C3AED" />
-        ) : (
-          <>
-            <Text style={styles.emoji}>👋</Text>
-            <Text style={styles.greeting}>Logged in as {user.email}</Text>
-            <Text style={styles.subtext}>
-              Please contact administration to claim your business pin.
-            </Text>
-            <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
-              <Text style={styles.signOutText}>Sign Out</Text>
-            </TouchableOpacity>
-          </>
-        )}
+        <ActivityIndicator size="large" color="#6C3AED" />
       </View>
     );
   }
@@ -486,22 +655,30 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 
-  /* Non-owner */
-  emoji: {
-    fontSize: 48,
+  /* Onboarding */
+  onboardingContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    padding: 24,
+  },
+  onboardingEmoji: {
+    fontSize: 56,
+    textAlign: 'center',
     marginBottom: 12,
   },
-  greeting: {
-    fontSize: 18,
-    fontWeight: '700',
+  onboardingTitle: {
+    fontSize: 22,
+    fontWeight: '800',
     color: '#1F2937',
-    marginBottom: 6,
+    textAlign: 'center',
+    marginBottom: 8,
   },
-  subtext: {
+  onboardingSubtext: {
     fontSize: 14,
     color: '#6B7280',
     textAlign: 'center',
-    marginBottom: 24,
+    marginBottom: 28,
+    lineHeight: 20,
   },
 
   /* Owner dashboard */
@@ -550,6 +727,52 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#9CA3AF',
     marginTop: 6,
+  },
+  descText: {
+    fontSize: 14,
+    color: '#4B5563',
+    lineHeight: 20,
+  },
+  charCounter: {
+    fontSize: 12,
+    color: '#9CA3AF',
+    textAlign: 'right',
+    marginTop: 4,
+  },
+  editDescBtn: {
+    marginTop: 8,
+  },
+  editDescBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6C3AED',
+  },
+  descBtnRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 10,
+  },
+  descBtn: {
+    flex: 1,
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  descBtnSave: {
+    backgroundColor: '#6C3AED',
+  },
+  descBtnSaveText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  descBtnCancel: {
+    backgroundColor: '#F3F4F6',
+  },
+  descBtnCancelText: {
+    color: '#6B7280',
+    fontWeight: '700',
+    fontSize: 14,
   },
   locationBtn: {
     backgroundColor: '#059669',

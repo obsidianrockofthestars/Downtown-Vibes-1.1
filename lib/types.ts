@@ -12,4 +12,5 @@ export interface Business {
   business_type: string;
   menu_link: string | null;
   website: string | null;
+  description: string | null;
 }
