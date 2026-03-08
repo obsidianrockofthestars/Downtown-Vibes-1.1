@@ -16,6 +16,10 @@ import * as Crypto from 'expo-crypto';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { Business } from '@/lib/types';
+import { haversineDistance } from '@/lib/haversine';
+
+const CLAIM_RADIUS_MILES = 0.1;
+const GOOGLE_PLACES_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
 
 export default function LoginScreen() {
   const { user, loading, signIn, signUp, signOut } = useAuth();
@@ -36,6 +40,7 @@ export default function LoginScreen() {
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [newBusinessName, setNewBusinessName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [businessCategory, setBusinessCategory] = useState<'storefront' | 'traveling'>('storefront');
   const [isEditingDesc, setIsEditingDesc] = useState(false);
   const [editDescText, setEditDescText] = useState('');
 
@@ -87,7 +92,17 @@ export default function LoginScreen() {
     setAuthLoading(true);
     const { error } = await signIn(email, password);
     setAuthLoading(false);
-    if (error) Alert.alert('Sign In Failed', error.message);
+
+    if (error) {
+      if (error.message.includes('Email not confirmed')) {
+        Alert.alert(
+          'Verify Your Email',
+          'You need to click the confirmation link we sent to your email before logging in. Check your spam folder!'
+        );
+      } else {
+        Alert.alert('Sign In Failed', error.message);
+      }
+    }
   };
 
   const handleSignUp = async () => {
@@ -109,7 +124,7 @@ export default function LoginScreen() {
     }
   };
 
-  // ─── Onboarding handler ─────────────────────────────────────
+  // ─── Onboarding handler (geofenced + Places verified) ───────
   const handleCreateBusiness = async () => {
     if (!user) return;
     const name = newBusinessName.trim();
@@ -118,26 +133,113 @@ export default function LoginScreen() {
       return;
     }
 
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert(
+        'Location Required',
+        'You must enable location access to claim a business.'
+      );
+      return;
+    }
+
     setCreating(true);
 
-    const { error } = await supabase.from('businesses').insert({
-      id: Crypto.randomUUID(),
-      owner_id: user.id,
-      business_name: name,
-      business_type: 'store',
-      latitude: 39.7675,
-      longitude: -94.8467,
-      emoji_icon: '🏪',
-      is_active: true,
-    });
+    try {
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+      const userLat = loc.coords.latitude;
+      const userLon = loc.coords.longitude;
 
-    setCreating(false);
+      if (businessCategory === 'traveling') {
+        // ── Traveling Business: skip Places API, use raw GPS ──
+        const { error } = await supabase.from('businesses').insert({
+          id: Crypto.randomUUID(),
+          place_id: null,
+          owner_id: user.id,
+          business_name: name,
+          business_type: 'traveling',
+          latitude: userLat,
+          longitude: userLon,
+          emoji_icon: '🚚',
+          is_active: true,
+        });
 
-    if (error) {
-      Alert.alert('Error', error.message);
-    } else {
-      setNewBusinessName('');
-      await fetchBusinessData(user.id);
+        if (error) {
+          Alert.alert('Error', error.message);
+        } else {
+          setNewBusinessName('');
+          await fetchBusinessData(user.id);
+        }
+        return;
+      }
+
+      // ── Static Storefront: full Google Places verification ──
+      const radius = Math.round(CLAIM_RADIUS_MILES * 1609.34);
+      const url =
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json` +
+        `?location=${userLat},${userLon}&radius=${radius}` +
+        `&keyword=${encodeURIComponent(name)}&key=${GOOGLE_PLACES_KEY}`;
+
+      const res = await fetch(url);
+      const json = await res.json();
+
+      if (!json.results || json.results.length === 0) {
+        Alert.alert(
+          'Business Not Found',
+          'We could not verify a business with that name at your current location. Make sure you are standing at your business and the name matches.'
+        );
+        setCreating(false);
+        return;
+      }
+
+      const place = json.results[0];
+      const placeLat = place.geometry.location.lat;
+      const placeLng = place.geometry.location.lng;
+
+      const dist = haversineDistance(userLat, userLon, placeLat, placeLng);
+      if (dist > CLAIM_RADIUS_MILES) {
+        Alert.alert(
+          'Too Far Away',
+          'You must be physically located at this business to claim it.'
+        );
+        setCreating(false);
+        return;
+      }
+
+      const { error } = await supabase.from('businesses').insert({
+        id: Crypto.randomUUID(),
+        place_id: place.place_id,
+        owner_id: user.id,
+        business_name: place.name || name,
+        business_type: 'store',
+        latitude: placeLat,
+        longitude: placeLng,
+        emoji_icon: '🏪',
+        is_active: true,
+      });
+
+      if (error) {
+        if (
+          error.message.includes('unique') ||
+          error.message.includes('duplicate') ||
+          error.code === '23505'
+        ) {
+          Alert.alert(
+            'Already Claimed',
+            'This business has already been claimed. If you are the true owner, please contact support to dispute.'
+          );
+        } else {
+          Alert.alert('Error', error.message);
+        }
+      } else {
+        setNewBusinessName('');
+        await fetchBusinessData(user.id);
+      }
+    } catch {
+      Alert.alert('Error', 'Failed to verify your location. Please try again.');
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -467,6 +569,49 @@ export default function LoginScreen() {
               autoCapitalize="words"
             />
 
+            <Text style={[styles.label, { marginTop: 18 }]}>Business Type</Text>
+            <View style={styles.toggleRow}>
+              <TouchableOpacity
+                style={[
+                  styles.toggleBtn,
+                  businessCategory === 'storefront' && styles.toggleBtnActive,
+                ]}
+                onPress={() => setBusinessCategory('storefront')}
+              >
+                <Text style={styles.toggleEmoji}>🏪</Text>
+                <Text
+                  style={[
+                    styles.toggleLabel,
+                    businessCategory === 'storefront' && styles.toggleLabelActive,
+                  ]}
+                >
+                  Static Storefront
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.toggleBtn,
+                  businessCategory === 'traveling' && styles.toggleBtnActive,
+                ]}
+                onPress={() => setBusinessCategory('traveling')}
+              >
+                <Text style={styles.toggleEmoji}>🚚</Text>
+                <Text
+                  style={[
+                    styles.toggleLabel,
+                    businessCategory === 'traveling' && styles.toggleLabelActive,
+                  ]}
+                >
+                  Traveling Business
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.helperText}>
+              {businessCategory === 'storefront'
+                ? 'Verified via Google Places — you must be at the business.'
+                : 'No Places verification — update your pin location anytime.'}
+            </Text>
+
             <TouchableOpacity
               style={[styles.primaryBtn, creating && styles.btnDisabled]}
               onPress={handleCreateBusiness}
@@ -653,6 +798,38 @@ const styles = StyleSheet.create({
     color: '#6C3AED',
     fontWeight: '600',
     fontSize: 14,
+  },
+
+  /* Toggle row */
+  toggleRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  toggleBtn: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#F9FAFB',
+  },
+  toggleBtnActive: {
+    borderColor: '#6C3AED',
+    backgroundColor: '#F3EAFF',
+  },
+  toggleEmoji: {
+    fontSize: 28,
+    marginBottom: 4,
+  },
+  toggleLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#9CA3AF',
+  },
+  toggleLabelActive: {
+    color: '#6C3AED',
   },
 
   /* Onboarding */

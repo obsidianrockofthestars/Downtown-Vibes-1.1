@@ -20,12 +20,13 @@ import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
 const RADAR_RADIUS_MILES = 0.15;
 const BBOX_DEGREES = 0.0025;
 
-const CATEGORIES = ['restaurant', 'bar', 'store'] as const;
+const CATEGORIES = ['restaurant', 'bar', 'store', 'traveling'] as const;
 
 const CHIP_COLORS: Record<string, { bg: string; text: string }> = {
   restaurant: { bg: '#22C55E', text: '#FFFFFF' },
   bar: { bg: '#3B82F6', text: '#FFFFFF' },
   store: { bg: '#EF4444', text: '#FFFFFF' },
+  traveling: { bg: '#F97316', text: '#FFFFFF' },
 };
 
 function getPinColor(type: string): string {
@@ -37,8 +38,10 @@ function getPinColor(type: string): string {
     case 'store':
     case 'retail':
       return 'red';
-    default:
+    case 'traveling':
       return 'orange';
+    default:
+      return 'violet';
   }
 }
 
@@ -53,6 +56,7 @@ export default function MapScreen() {
     'restaurant',
     'bar',
     'store',
+    'traveling',
   ]);
   const [nearbySales, setNearbySales] = useState<NearbySale[]>([]);
   const [saleFilterIds, setSaleFilterIds] = useState<string[] | null>(null);

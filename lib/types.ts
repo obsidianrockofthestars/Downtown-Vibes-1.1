@@ -1,6 +1,7 @@
 export interface Business {
   id: string;
-  place_id: string;
+  place_id: string | null;
+  google_place_id?: string | null;
   owner_id: string;
   business_name: string;
   history_fact: string;
