@@ -1,6 +1,6 @@
 module.exports = {
   expo: {
-    name: 'Vibeathon',
+    name: 'DowntownVibes',
     slug: 'Vibeathon',
     version: '1.0.0',
     orientation: 'portrait',
@@ -16,7 +16,10 @@ module.exports = {
       supportsTablet: true,
       infoPlist: {
         NSLocationWhenInUseUsageDescription:
-          'Vibeathon uses your location to show nearby businesses and flash sale alerts.',
+          'DowntownVibes uses your location to show nearby businesses and flash sale alerts.',
+        NSLocationAlwaysAndWhenInUseUsageDescription:
+          'Allow DowntownVibes to use your location in the background to send you notifications when you walk near an active flash sale.',
+        UIBackgroundModes: ['location', 'fetch'],
       },
     },
     android: {
@@ -31,7 +34,7 @@ module.exports = {
           apiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
         },
       },
-      permissions: ['ACCESS_FINE_LOCATION', 'ACCESS_COARSE_LOCATION'],
+      permissions: ['ACCESS_FINE_LOCATION', 'ACCESS_COARSE_LOCATION', 'ACCESS_BACKGROUND_LOCATION'],
       package: 'com.anonymous.Vibeathon',
     },
     web: {
@@ -45,7 +48,17 @@ module.exports = {
         'expo-location',
         {
           locationWhenInUsePermission:
-            'Vibeathon uses your location to show nearby businesses and flash sale alerts.',
+            'DowntownVibes uses your location to show nearby businesses and flash sale alerts.',
+          locationAlwaysAndWhenInUsePermission:
+            'Allow DowntownVibes to use your location in the background to send you notifications when you walk near an active flash sale.',
+          isAndroidBackgroundLocationEnabled: true,
+        },
+      ],
+      [
+        'expo-notifications',
+        {
+          icon: './assets/images/icon.png',
+          color: '#6C3AED',
         },
       ],
     ],

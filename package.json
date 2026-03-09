@@ -1,5 +1,5 @@
 {
-  "name": "vibeathonapp",
+  "name": "downtownvibes",
   "main": "expo-router/entry",
   "version": "1.0.0",
   "scripts": {
@@ -27,10 +27,12 @@
     "expo-font": "~55.0.4",
     "expo-linking": "~55.0.7",
     "expo-location": "~55.1.2",
+    "expo-notifications": "~55.0.11",
     "expo-router": "~55.0.3",
     "expo-splash-screen": "~55.0.10",
     "expo-status-bar": "~55.0.4",
     "expo-symbols": "~55.0.4",
+    "expo-task-manager": "~55.0.9",
     "expo-web-browser": "~55.0.9",
     "jest-expo": "~55.0.9",
     "react": "19.2.0",

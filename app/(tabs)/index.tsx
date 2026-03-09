@@ -7,15 +7,22 @@ import {
   TouchableOpacity,
   Linking,
   Alert,
+  Platform,
 } from 'react-native';
 import MapView, { Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import { supabase } from '@/lib/supabase';
 import { Business } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
+import { GEOFENCE_TASK } from '@/lib/backgroundTasks';
 import { SearchBar } from '@/components/SearchBar';
 import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
+
+const GEOFENCE_RADIUS_METERS = 160;
+const MAX_GEOFENCE_REGIONS = 20;
 
 const RADAR_RADIUS_MILES = 0.15;
 const BBOX_DEGREES = 0.0025;
@@ -46,12 +53,15 @@ function getPinColor(type: string): string {
 }
 
 export default function MapScreen() {
+  const insets = useSafeAreaInsets();
+
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [userLocation, setUserLocation] = useState<{
     latitude: number;
     longitude: number;
   } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [activeFilters, setActiveFilters] = useState<string[]>([
     'restaurant',
     'bar',
@@ -108,11 +118,18 @@ export default function MapScreen() {
     let sub: Location.LocationSubscription | null = null;
 
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
+      const { status: fg } = await Location.requestForegroundPermissionsAsync();
+      if (fg !== 'granted') {
         setPermissionDenied(true);
         return;
       }
+
+      const { status: bg } = await Location.requestBackgroundPermissionsAsync();
+      if (bg !== 'granted') {
+        console.warn('Background location denied — geofencing disabled');
+      }
+
+      await Notifications.requestPermissionsAsync();
 
       sub = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.Balanced, distanceInterval: 15 },
@@ -165,6 +182,49 @@ export default function MapScreen() {
     }
   }, [userLocation, businesses]);
 
+  // Geofencing: register the 20 nearest businesses as geofence regions
+  useEffect(() => {
+    if (!userLocation || businesses.length === 0) return;
+
+    (async () => {
+      const bgGranted = await Location.getBackgroundPermissionsAsync();
+      if (bgGranted.status !== 'granted') return;
+
+      const sorted = [...businesses]
+        .map((biz) => ({
+          biz,
+          dist: haversineDistance(
+            userLocation.latitude,
+            userLocation.longitude,
+            biz.latitude,
+            biz.longitude
+          ),
+        }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, MAX_GEOFENCE_REGIONS);
+
+      const regions: Location.LocationRegion[] = sorted.map(({ biz }) => ({
+        identifier: biz.business_name,
+        latitude: biz.latitude,
+        longitude: biz.longitude,
+        radius: GEOFENCE_RADIUS_METERS,
+        notifyOnEnter: true,
+        notifyOnExit: false,
+      }));
+
+      try {
+        await Location.startGeofencingAsync(GEOFENCE_TASK, regions);
+      } catch (err) {
+        console.warn('Geofencing start error:', err);
+      }
+    })();
+  }, [userLocation, businesses]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearchQuery(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   const handleOpenMenu = useCallback(async (url: string) => {
     try {
       const supported = await Linking.canOpenURL(url);
@@ -201,7 +261,7 @@ export default function MapScreen() {
       return businesses.filter((b) => saleFilterIds.includes(b.id));
     }
 
-    const q = searchQuery.trim().toLowerCase();
+    const q = debouncedSearchQuery.trim().toLowerCase();
 
     return businesses.filter((b) => {
       const type = (b.business_type ?? '').toLowerCase();
@@ -211,7 +271,7 @@ export default function MapScreen() {
       if (q) return name.includes(q) || type.includes(q);
       return true;
     });
-  }, [businesses, activeFilters, searchQuery, saleFilterIds]);
+  }, [businesses, activeFilters, debouncedSearchQuery, saleFilterIds]);
 
   return (
     <View style={styles.container}>
@@ -259,7 +319,7 @@ export default function MapScreen() {
       </MapView>
 
       {/* Search + Filter Chips overlay */}
-      <View style={styles.overlay}>
+      <View style={[styles.overlay, { paddingTop: insets.top + 10 }]}>
         <SearchBar value={searchQuery} onChange={setSearchQuery} />
         <ScrollView
           horizontal
@@ -355,6 +415,25 @@ export default function MapScreen() {
                 </Text>
               )}
 
+              <TouchableOpacity
+                style={styles.directionsButton}
+                activeOpacity={0.8}
+                onPress={() => {
+                  const label = encodeURIComponent(selectedBusiness.business_name);
+                  const lat = selectedBusiness.latitude;
+                  const lng = selectedBusiness.longitude;
+                  const url =
+                    Platform.OS === 'ios'
+                      ? `maps:0,0?q=${label}@${lat},${lng}`
+                      : `geo:0,0?q=${lat},${lng}(${label})`;
+                  Linking.openURL(url).catch(() =>
+                    Alert.alert('Error', 'Could not open maps.')
+                  );
+                }}
+              >
+                <Text style={styles.sheetButtonText}>🧭 Get Directions</Text>
+              </TouchableOpacity>
+
               {selectedBusiness.menu_link?.startsWith('http') ? (
                 <TouchableOpacity
                   style={styles.sheetButton}
@@ -384,7 +463,7 @@ const styles = StyleSheet.create({
     zIndex: 50,
   },
   chipScroll: {
-    marginTop: 108,
+    marginTop: 8,
     paddingLeft: 12,
   },
   chipRow: {
@@ -492,6 +571,13 @@ const styles = StyleSheet.create({
     color: '#9CA3AF',
     textTransform: 'capitalize',
     marginBottom: 12,
+  },
+  directionsButton: {
+    marginTop: 8,
+    backgroundColor: '#059669',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
   },
   sheetButton: {
     marginTop: 8,
