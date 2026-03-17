@@ -3,7 +3,9 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -13,6 +15,8 @@ import {
 } from 'react-native';
 import * as Location from 'expo-location';
 import * as Crypto from 'expo-crypto';
+import Purchases from 'react-native-purchases';
+import RevenueCatUI from 'react-native-purchases-ui';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { Business } from '@/lib/types';
@@ -43,6 +47,9 @@ export default function LoginScreen() {
   const [businessCategory, setBusinessCategory] = useState<'storefront' | 'traveling'>('storefront');
   const [isEditingDesc, setIsEditingDesc] = useState(false);
   const [editDescText, setEditDescText] = useState('');
+  const [demoBypass, setDemoBypass] = useState(false);
+  const [bypassModalVisible, setBypassModalVisible] = useState(false);
+  const [bypassCode, setBypassCode] = useState('');
 
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
@@ -124,13 +131,33 @@ export default function LoginScreen() {
     }
   };
 
-  // ─── Onboarding handler (geofenced + Places verified) ───────
+  // ─── Onboarding handler (paywalled + geofenced + Places verified) ──
   const handleCreateBusiness = async () => {
     if (!user) return;
     const name = newBusinessName.trim();
     if (!name) {
       Alert.alert('Missing Name', 'Enter your business name to continue.');
       return;
+    }
+
+    // Paywall gate — present RevenueCat paywall if user lacks entitlement
+    if (!demoBypass) {
+      try {
+        const paywallResult = await RevenueCatUI.presentPaywallIfNeeded({
+          requiredEntitlementIdentifier: 'DowntownVibes Pro',
+        });
+
+        if (paywallResult === 'NOT_PURCHASED' || paywallResult === 'CANCELLED') {
+          return;
+        }
+        if (paywallResult === 'ERROR') {
+          Alert.alert('Error', 'Could not load subscription options. Try again.');
+          return;
+        }
+      } catch {
+        Alert.alert('Error', 'Could not verify subscription status. Try again.');
+        return;
+      }
     }
 
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -530,6 +557,17 @@ export default function LoginScreen() {
             )}
           </TouchableOpacity>
 
+          <TouchableOpacity
+            style={styles.manageSubBtn}
+            onPress={() => {
+              RevenueCatUI.presentCustomerCenter().catch(() =>
+                Alert.alert('Error', 'Could not open subscription management.')
+              );
+            }}
+          >
+            <Text style={styles.manageSubBtnText}>Manage Subscription</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
             <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>
@@ -550,9 +588,17 @@ export default function LoginScreen() {
           keyboardShouldPersistTaps="handled"
         >
           <Text style={styles.onboardingEmoji}>📍</Text>
-          <Text style={styles.onboardingTitle}>
-            Welcome! Let's get your business on the map.
-          </Text>
+          <Pressable
+            onLongPress={() => {
+              setBypassCode('');
+              setBypassModalVisible(true);
+            }}
+            delayLongPress={800}
+          >
+            <Text style={styles.onboardingTitle}>
+              Welcome! Let's get your business on the map.
+            </Text>
+          </Pressable>
           <Text style={styles.onboardingSubtext}>
             Enter your business name below and we'll create your pin. You can
             update your location, emoji, and details from the dashboard.
@@ -628,6 +674,51 @@ export default function LoginScreen() {
           <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
             <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>
+
+          {/* Hidden bypass modal — no visible trigger */}
+          <Modal
+            visible={bypassModalVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setBypassModalVisible(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={styles.modalCard}>
+                <Text style={styles.modalTitle}>Admin Override</Text>
+                <TextInput
+                  style={styles.input}
+                  value={bypassCode}
+                  onChangeText={setBypassCode}
+                  placeholder="Enter bypass code"
+                  placeholderTextColor="#9CA3AF"
+                  autoCapitalize="none"
+                  secureTextEntry
+                />
+                <View style={styles.modalBtnRow}>
+                  <TouchableOpacity
+                    style={[styles.modalBtn, styles.modalBtnConfirm]}
+                    onPress={() => {
+                      if (bypassCode === 'dylan2026') {
+                        setDemoBypass(true);
+                        setBypassModalVisible(false);
+                        Alert.alert('Bypass Active', 'Paywall check disabled for this session.');
+                      } else {
+                        Alert.alert('Invalid Code');
+                      }
+                    }}
+                  >
+                    <Text style={styles.modalBtnText}>Confirm</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modalBtn, styles.modalBtnCancel]}
+                    onPress={() => setBypassModalVisible(false)}
+                  >
+                    <Text style={[styles.modalBtnText, { color: '#6B7280' }]}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
         </ScrollView>
       </KeyboardAvoidingView>
     );
@@ -652,7 +743,7 @@ export default function LoginScreen() {
         contentContainerStyle={styles.authContent}
         keyboardShouldPersistTaps="handled"
       >
-        <Text style={styles.logo}>Vibeathon</Text>
+        <Text style={styles.logo}>DowntownVibes</Text>
         <Text style={styles.tagline}>
           Log in to claim & manage your business
         </Text>
@@ -977,6 +1068,21 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 16,
   },
+  manageSubBtn: {
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginHorizontal: 20,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+  },
+  manageSubBtnText: {
+    color: '#374151',
+    fontWeight: '700',
+    fontSize: 15,
+  },
   signOutBtn: {
     backgroundColor: '#FEE2E2',
     borderRadius: 12,
@@ -989,5 +1095,50 @@ const styles = StyleSheet.create({
     color: '#DC2626',
     fontWeight: '700',
     fontSize: 15,
+  },
+
+  /* Bypass modal */
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 340,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1F2937',
+    marginBottom: 14,
+    textAlign: 'center',
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 16,
+  },
+  modalBtn: {
+    flex: 1,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  modalBtnConfirm: {
+    backgroundColor: '#6C3AED',
+  },
+  modalBtnCancel: {
+    backgroundColor: '#F3F4F6',
+  },
+  modalBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14,
   },
 });

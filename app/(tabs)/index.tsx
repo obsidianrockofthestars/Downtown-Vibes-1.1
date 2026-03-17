@@ -319,7 +319,7 @@ export default function MapScreen() {
       </MapView>
 
       {/* Search + Filter Chips overlay */}
-      <View style={[styles.overlay, { paddingTop: insets.top + 10 }]}>
+      <View style={[styles.topContainer, { top: insets.top + 10 }]} pointerEvents="box-none">
         <SearchBar value={searchQuery} onChange={setSearchQuery} />
         <ScrollView
           horizontal
@@ -455,15 +455,15 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  overlay: {
+  topContainer: {
     position: 'absolute',
-    top: 0,
     left: 0,
     right: 0,
     zIndex: 50,
+    flexDirection: 'column',
+    gap: 12,
   },
   chipScroll: {
-    marginTop: 8,
     paddingLeft: 12,
   },
   chipRow: {
