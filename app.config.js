@@ -14,6 +14,7 @@ module.exports = {
     },
     ios: {
       supportsTablet: true,
+      bundleIdentifier: 'com.potionsandfamiliars.downtownvibes',
       infoPlist: {
         NSLocationWhenInUseUsageDescription:
           'DowntownVibes uses your location to show nearby businesses and flash sale alerts.',
@@ -35,7 +36,7 @@ module.exports = {
         },
       },
       permissions: ['ACCESS_FINE_LOCATION', 'ACCESS_COARSE_LOCATION', 'ACCESS_BACKGROUND_LOCATION'],
-      package: 'com.anonymous.Vibeathon',
+      package: 'com.potionsandfamiliars.downtownvibes',
     },
     web: {
       bundler: 'metro',

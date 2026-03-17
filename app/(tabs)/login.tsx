@@ -51,6 +51,8 @@ export default function LoginScreen() {
   const [demoBypass, setDemoBypass] = useState(false);
   const [bypassModalVisible, setBypassModalVisible] = useState(false);
   const [bypassCode, setBypassCode] = useState('');
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [paywallEntitlement, setPaywallEntitlement] = useState<'single_pin' | 'dual_pin'>('single_pin');
 
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
@@ -169,18 +171,12 @@ export default function LoginScreen() {
         const hasDual = typeof customerInfo.entitlements.active['dual_pin'] !== 'undefined';
 
         if (ownedPinCount === 0 && !hasSingle && !hasDual) {
-          const paywallResult = await RevenueCatUI.presentPaywallIfNeeded({
-            requiredEntitlementIdentifier: 'single_pin',
-          });
-          if (paywallResult === 'NOT_PURCHASED' || paywallResult === 'CANCELLED') return;
-          if (paywallResult === 'ERROR') {
-            Alert.alert('Error', 'Could not load subscription options. Try again.');
-            return;
-          }
+          setPaywallEntitlement('single_pin');
+          setShowPaywall(true);
+          return;
         }
 
         if (ownedPinCount === 1 && !hasDual) {
-          // TODO: Wire this to the specific RevenueCat dual_pin upgrade package
           Alert.alert(
             'Upgrade Required',
             'You must upgrade to the $15/mo Dual Pin tier to add a second location.',
@@ -188,12 +184,9 @@ export default function LoginScreen() {
               { text: 'Cancel', style: 'cancel' },
               {
                 text: 'View Plans',
-                onPress: async () => {
-                  try {
-                    await RevenueCatUI.presentPaywallIfNeeded({
-                      requiredEntitlementIdentifier: 'dual_pin',
-                    });
-                  } catch {}
+                onPress: () => {
+                  setPaywallEntitlement('dual_pin');
+                  setShowPaywall(true);
                 },
               },
             ]
@@ -793,6 +786,31 @@ export default function LoginScreen() {
               </View>
             </View>
           </Modal>
+
+          {/* RevenueCat Paywall Modal */}
+          <Modal
+            visible={showPaywall}
+            animationType="slide"
+            presentationStyle="pageSheet"
+            onRequestClose={() => setShowPaywall(false)}
+          >
+            <View style={styles.paywallContainer}>
+              <RevenueCatUI.Paywall
+                options={{
+                  requiredEntitlementIdentifier: paywallEntitlement,
+                }}
+                onPurchaseCompleted={() => setShowPaywall(false)}
+                onRestoreCompleted={() => setShowPaywall(false)}
+                onDismiss={() => setShowPaywall(false)}
+              />
+              <TouchableOpacity
+                style={styles.paywallCloseBtn}
+                onPress={() => setShowPaywall(false)}
+              >
+                <Text style={styles.paywallCloseBtnText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </Modal>
         </ScrollView>
       </KeyboardAvoidingView>
     );
@@ -1214,5 +1232,21 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 14,
+  },
+  paywallContainer: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  paywallCloseBtn: {
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 16,
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+  },
+  paywallCloseBtnText: {
+    color: '#6B7280',
+    fontWeight: '700',
+    fontSize: 16,
   },
 });
