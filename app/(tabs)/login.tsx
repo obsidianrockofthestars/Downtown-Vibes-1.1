@@ -7,6 +7,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -140,18 +141,63 @@ export default function LoginScreen() {
       return;
     }
 
-    // Paywall gate — present RevenueCat paywall if user lacks entitlement
+    // ── Quantity-based entitlement gate ──
     if (!demoBypass) {
       try {
-        const paywallResult = await RevenueCatUI.presentPaywallIfNeeded({
-          requiredEntitlementIdentifier: 'DowntownVibes Pro',
-        });
+        const { count, error: countErr } = await supabase
+          .from('businesses')
+          .select('id', { count: 'exact', head: true })
+          .eq('owner_id', user.id);
 
-        if (paywallResult === 'NOT_PURCHASED' || paywallResult === 'CANCELLED') {
+        if (countErr) {
+          Alert.alert('Error', 'Could not verify your current pins. Try again.');
           return;
         }
-        if (paywallResult === 'ERROR') {
-          Alert.alert('Error', 'Could not load subscription options. Try again.');
+
+        const ownedPinCount = count ?? 0;
+
+        if (ownedPinCount >= 2) {
+          Alert.alert(
+            'Maximum Locations Reached',
+            'You currently have 2 pins. Contact support for enterprise pricing.'
+          );
+          return;
+        }
+
+        const customerInfo = await Purchases.getCustomerInfo();
+        const hasSingle = typeof customerInfo.entitlements.active['single_pin'] !== 'undefined';
+        const hasDual = typeof customerInfo.entitlements.active['dual_pin'] !== 'undefined';
+
+        if (ownedPinCount === 0 && !hasSingle && !hasDual) {
+          const paywallResult = await RevenueCatUI.presentPaywallIfNeeded({
+            requiredEntitlementIdentifier: 'single_pin',
+          });
+          if (paywallResult === 'NOT_PURCHASED' || paywallResult === 'CANCELLED') return;
+          if (paywallResult === 'ERROR') {
+            Alert.alert('Error', 'Could not load subscription options. Try again.');
+            return;
+          }
+        }
+
+        if (ownedPinCount === 1 && !hasDual) {
+          // TODO: Wire this to the specific RevenueCat dual_pin upgrade package
+          Alert.alert(
+            'Upgrade Required',
+            'You must upgrade to the $15/mo Dual Pin tier to add a second location.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'View Plans',
+                onPress: async () => {
+                  try {
+                    await RevenueCatUI.presentPaywallIfNeeded({
+                      requiredEntitlementIdentifier: 'dual_pin',
+                    });
+                  } catch {}
+                },
+              },
+            ]
+          );
           return;
         }
       } catch {
@@ -317,7 +363,24 @@ export default function LoginScreen() {
       setOwnedBusiness(data);
       setMenuLink(data.menu_link ?? '');
       setWebsite(data.website ?? '');
-      Alert.alert('Saved', 'Your business has been updated.');
+
+      const saleText = (data.flash_sale ?? '').trim();
+      if (saleText) {
+        Alert.alert('Saved', 'Your business has been updated.', [
+          { text: 'Done', style: 'cancel' },
+          {
+            text: 'Share Flash Sale',
+            onPress: () => {
+              Share.share({
+                message: `Hey St. Joe! ${data.business_name} just started a new flash sale: "${saleText}" — Check us out on DowntownVibes!`,
+                title: 'DowntownVibes Alert',
+              }).catch(() => {});
+            },
+          },
+        ]);
+      } else {
+        Alert.alert('Saved', 'Your business has been updated.');
+      }
     }
   };
 
@@ -383,7 +446,18 @@ export default function LoginScreen() {
         Alert.alert('Error', error.message);
       } else if (data) {
         setOwnedBusiness(data);
-        Alert.alert('Success', 'Your pin has been moved to your current location!');
+        Alert.alert('Success', 'Your pin has been moved to your current location!', [
+          { text: 'Done', style: 'cancel' },
+          {
+            text: 'Share Update',
+            onPress: () => {
+              Share.share({
+                message: `Hey St. Joe! ${data.business_name} just moved our location! Check the DowntownVibes app to see exactly where we are today!`,
+                title: 'DowntownVibes Alert',
+              }).catch(() => {});
+            },
+          },
+        ]);
       }
     } catch {
       Alert.alert('Error', 'Failed to acquire GPS position.');
