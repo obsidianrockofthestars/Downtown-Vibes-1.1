@@ -20,18 +20,20 @@ import Purchases from 'react-native-purchases';
 import RevenueCatUI from 'react-native-purchases-ui';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
-import { Business } from '@/lib/types';
+import { Business, UserRole } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
 
 const CLAIM_RADIUS_MILES = 0.1;
 const GOOGLE_PLACES_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
+const DEEP_LINK = 'vibeathon://';
 
 export default function LoginScreen() {
-  const { user, loading, signIn, signUp, signOut } = useAuth();
+  const { user, role, loading, signIn, signUp, signOut } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [authRole, setAuthRole] = useState<UserRole | null>(null);
 
   const [ownedBusiness, setOwnedBusiness] = useState<Business | null>(null);
   const [bizLoading, setBizLoading] = useState(false);
@@ -90,10 +92,10 @@ export default function LoginScreen() {
       setNeedsOnboarding(false);
       return;
     }
+    if (role === 'customer') return;
     fetchBusinessData(user.id);
-  }, [user]);
+  }, [user, role]);
 
-  // ─── Auth handlers ───────────────────────────────────────────
   const handleSignIn = async () => {
     if (!email || !password) {
       Alert.alert('Missing Fields', 'Enter your email and password.');
@@ -125,7 +127,7 @@ export default function LoginScreen() {
       return;
     }
     setAuthLoading(true);
-    const { error } = await signUp(email, password);
+    const { error } = await signUp(email, password, authRole ?? 'customer');
     setAuthLoading(false);
     if (error) {
       Alert.alert('Sign Up Failed', error.message);
@@ -134,7 +136,6 @@ export default function LoginScreen() {
     }
   };
 
-  // ─── Onboarding handler (paywalled + geofenced + Places verified) ──
   const handleCreateBusiness = async () => {
     if (!user) return;
     const name = newBusinessName.trim();
@@ -143,7 +144,6 @@ export default function LoginScreen() {
       return;
     }
 
-    // ── Quantity-based entitlement gate ──
     if (!demoBypass) {
       try {
         const { count, error: countErr } = await supabase
@@ -218,7 +218,6 @@ export default function LoginScreen() {
       const userLon = loc.coords.longitude;
 
       if (businessCategory === 'traveling') {
-        // ── Traveling Business: skip Places API, use raw GPS ──
         const { error } = await supabase.from('businesses').insert({
           id: Crypto.randomUUID(),
           place_id: null,
@@ -236,11 +235,11 @@ export default function LoginScreen() {
         } else {
           setNewBusinessName('');
           await fetchBusinessData(user.id);
+          promptSharePin(name);
         }
         return;
       }
 
-      // ── Static Storefront: full Google Places verification ──
       const radius = Math.round(CLAIM_RADIUS_MILES * 1609.34);
       const url =
         `https://maps.googleapis.com/maps/api/place/nearbysearch/json` +
@@ -273,11 +272,12 @@ export default function LoginScreen() {
         return;
       }
 
+      const displayName = place.name || name;
       const { error } = await supabase.from('businesses').insert({
         id: Crypto.randomUUID(),
         place_id: place.place_id,
         owner_id: user.id,
-        business_name: place.name || name,
+        business_name: displayName,
         business_type: 'store',
         latitude: placeLat,
         longitude: placeLng,
@@ -301,6 +301,7 @@ export default function LoginScreen() {
       } else {
         setNewBusinessName('');
         await fetchBusinessData(user.id);
+        promptSharePin(displayName);
       }
     } catch {
       Alert.alert('Error', 'Failed to verify your location. Please try again.');
@@ -309,7 +310,21 @@ export default function LoginScreen() {
     }
   };
 
-  // ─── Dashboard save handler ──────────────────────────────────
+  const promptSharePin = (businessName: string) => {
+    Alert.alert('Pin Created!', 'Your business is now on the map.', [
+      { text: 'Done', style: 'cancel' },
+      {
+        text: 'Share',
+        onPress: () => {
+          Share.share({
+            message: `📍 ${businessName} is now on DowntownVibes! Find us on the map: ${DEEP_LINK}`,
+            title: 'DowntownVibes',
+          }).catch(() => {});
+        },
+      },
+    ]);
+  };
+
   const normalizeUrl = (raw: string): string | null => {
     const trimmed = raw.trim();
     if (!trimmed) return null;
@@ -365,8 +380,8 @@ export default function LoginScreen() {
             text: 'Share Flash Sale',
             onPress: () => {
               Share.share({
-                message: `Hey St. Joe! ${data.business_name} just started a new flash sale: "${saleText}" — Check us out on DowntownVibes!`,
-                title: 'DowntownVibes Alert',
+                message: `🔥 Flash Sale at ${data.business_name}! "${saleText}" — Open DowntownVibes to see the deal: ${DEEP_LINK}`,
+                title: 'DowntownVibes Flash Sale',
               }).catch(() => {});
             },
           },
@@ -377,7 +392,6 @@ export default function LoginScreen() {
     }
   };
 
-  // ─── Description update handler ─────────────────────────────
   const handleUpdateDescription = async () => {
     if (!ownedBusiness) return;
     if (editDescText.length > 100) {
@@ -405,7 +419,6 @@ export default function LoginScreen() {
     }
   };
 
-  // ─── Update pin location handler ────────────────────────────
   const handleUpdateLocation = async () => {
     if (!ownedBusiness) return;
 
@@ -445,8 +458,8 @@ export default function LoginScreen() {
             text: 'Share Update',
             onPress: () => {
               Share.share({
-                message: `Hey St. Joe! ${data.business_name} just moved our location! Check the DowntownVibes app to see exactly where we are today!`,
-                title: 'DowntownVibes Alert',
+                message: `📍 ${data.business_name} just moved! Find us on DowntownVibes: ${DEEP_LINK}`,
+                title: 'DowntownVibes Pin Update',
               }).catch(() => {});
             },
           },
@@ -464,6 +477,19 @@ export default function LoginScreen() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#6C3AED" />
+      </View>
+    );
+  }
+
+  // ─── Customer redirect ────────────────────────────────────────
+  if (user && role === 'customer') {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.customerRedirectEmoji}>✨</Text>
+        <Text style={styles.customerRedirectTitle}>You're signed in!</Text>
+        <Text style={styles.customerRedirectSub}>
+          Head to the Profile tab to manage your account and Vibe Checks.
+        </Text>
       </View>
     );
   }
@@ -643,7 +669,7 @@ export default function LoginScreen() {
     );
   }
 
-  // ─── Logged-in: Onboarding ──────────────────────────────────
+  // ─── Logged-in: Owner Onboarding ──────────────────────────────
   if (user && needsOnboarding) {
     return (
       <KeyboardAvoidingView
@@ -742,7 +768,6 @@ export default function LoginScreen() {
             <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>
 
-          {/* Hidden bypass modal — no visible trigger */}
           <Modal
             visible={bypassModalVisible}
             transparent
@@ -787,7 +812,6 @@ export default function LoginScreen() {
             </View>
           </Modal>
 
-          {/* RevenueCat Paywall Modal */}
           <Modal
             visible={showPaywall}
             animationType="slide"
@@ -796,9 +820,7 @@ export default function LoginScreen() {
           >
             <View style={styles.paywallContainer}>
               <RevenueCatUI.Paywall
-                options={{
-                  requiredEntitlementIdentifier: paywallEntitlement,
-                }}
+                options={{} as any}
                 onPurchaseCompleted={() => setShowPaywall(false)}
                 onRestoreCompleted={() => setShowPaywall(false)}
                 onDismiss={() => setShowPaywall(false)}
@@ -816,7 +838,7 @@ export default function LoginScreen() {
     );
   }
 
-  // ─── Logged-in: Loading ────────────────────────────────────
+  // ─── Logged-in: Loading business data ─────────────────────────
   if (user && bizLoading) {
     return (
       <View style={styles.center}>
@@ -825,7 +847,44 @@ export default function LoginScreen() {
     );
   }
 
-  // ─── Guest: Auth form ────────────────────────────────────────
+  // ─── Guest: Role picker ───────────────────────────────────────
+  if (!user && !authRole) {
+    return (
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={styles.rolePickerContent}
+      >
+        <Text style={styles.logo}>DowntownVibes</Text>
+        <Text style={styles.tagline}>How do you vibe?</Text>
+
+        <TouchableOpacity
+          style={styles.roleCard}
+          activeOpacity={0.8}
+          onPress={() => setAuthRole('owner')}
+        >
+          <Text style={styles.roleEmoji}>🏪</Text>
+          <Text style={styles.roleTitle}>I'm a Business Owner</Text>
+          <Text style={styles.roleSubtext}>
+            Claim your pin, manage sales & more
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.roleCard}
+          activeOpacity={0.8}
+          onPress={() => setAuthRole('customer')}
+        >
+          <Text style={styles.roleEmoji}>🔥</Text>
+          <Text style={styles.roleTitle}>I'm a Customer</Text>
+          <Text style={styles.roleSubtext}>
+            Discover deals, leave Vibe Checks — free!
+          </Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
+  // ─── Guest: Auth form (shared by both roles) ──────────────────
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -835,9 +894,18 @@ export default function LoginScreen() {
         contentContainerStyle={styles.authContent}
         keyboardShouldPersistTaps="handled"
       >
+        <TouchableOpacity
+          style={styles.backBtn}
+          onPress={() => setAuthRole(null)}
+        >
+          <Text style={styles.backBtnText}>← Back</Text>
+        </TouchableOpacity>
+
         <Text style={styles.logo}>DowntownVibes</Text>
         <Text style={styles.tagline}>
-          Log in to claim & manage your business
+          {authRole === 'owner'
+            ? 'Sign in to manage your business'
+            : 'Sign in to start exploring'}
         </Text>
 
         <View style={styles.formCard}>
@@ -913,6 +981,72 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     justifyContent: 'center',
     padding: 24,
+  },
+
+  /* Customer redirect */
+  customerRedirectEmoji: {
+    fontSize: 48,
+    marginBottom: 12,
+  },
+  customerRedirectTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#1F2937',
+    marginBottom: 8,
+  },
+  customerRedirectSub: {
+    fontSize: 15,
+    color: '#6B7280',
+    textAlign: 'center',
+    lineHeight: 22,
+    paddingHorizontal: 20,
+  },
+
+  /* Role picker */
+  rolePickerContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    padding: 24,
+  },
+  roleCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 24,
+    marginBottom: 16,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+  },
+  roleEmoji: {
+    fontSize: 42,
+    marginBottom: 10,
+  },
+  roleTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1F2937',
+    marginBottom: 4,
+  },
+  roleSubtext: {
+    fontSize: 13,
+    color: '#6B7280',
+    textAlign: 'center',
+  },
+
+  /* Back button */
+  backBtn: {
+    marginBottom: 16,
+    alignSelf: 'flex-start',
+  },
+  backBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#6C3AED',
   },
 
   /* Auth form */

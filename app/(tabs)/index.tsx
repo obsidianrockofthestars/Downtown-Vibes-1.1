@@ -8,18 +8,26 @@ import {
   Linking,
   Alert,
   Platform,
+  Modal,
+  Pressable,
+  Animated,
+  TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import MapView, { Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+// @ts-ignore
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { supabase } from '@/lib/supabase';
-import { Business } from '@/lib/types';
+import { Business, VibeCheck } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
 import { GEOFENCE_TASK } from '@/lib/backgroundTasks';
 import { SearchBar } from '@/components/SearchBar';
 import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
+import { useAuth } from '@/context/AuthContext';
 
 const GEOFENCE_RADIUS_METERS = 160;
 const MAX_GEOFENCE_REGIONS = 20;
@@ -52,8 +60,29 @@ function getPinColor(type: string): string {
   }
 }
 
+function renderStars(rating: number): string {
+  const full = Math.round(rating);
+  return '\u2605'.repeat(full) + '\u2606'.repeat(5 - full);
+}
+
+function formatTimeAgo(dateString: string): string {
+  const seconds = Math.floor(
+    (Date.now() - new Date(dateString).getTime()) / 1000
+  );
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  const weeks = Math.floor(days / 7);
+  return `${weeks}w ago`;
+}
+
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
+  const { user, role } = useAuth();
 
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [userLocation, setUserLocation] = useState<{
@@ -62,6 +91,7 @@ export default function MapScreen() {
   } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const [filtersVisible, setFiltersVisible] = useState(false);
   const [activeFilters, setActiveFilters] = useState<string[]>([
     'restaurant',
     'bar',
@@ -75,10 +105,38 @@ export default function MapScreen() {
     null
   );
 
+  // Vibe Checks state
+  const [vibeChecks, setVibeChecks] = useState<VibeCheck[]>([]);
+  const [vibeLoading, setVibeLoading] = useState(false);
+  const [showVibeForm, setShowVibeForm] = useState(false);
+  const [vibeRating, setVibeRating] = useState(0);
+  const [vibeComment, setVibeComment] = useState('');
+  const [vibeSubmitting, setVibeSubmitting] = useState(false);
+
   const shownSalesRef = useRef<Set<string>>(new Set());
   const mapRef = useRef<MapView | null>(null);
   const bottomSheetRef = useRef<BottomSheet>(null);
-  const snapPoints = useMemo(() => ['35%'], []);
+  const snapPoints = useMemo(() => ['50%', '90%'], []);
+  const filtersAnim = useRef(new Animated.Value(0)).current;
+
+  const openFilters = useCallback(() => {
+    setFiltersVisible(true);
+    Animated.timing(filtersAnim, {
+      toValue: 1,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [filtersAnim]);
+
+  const closeFilters = useCallback(() => {
+    Animated.timing(filtersAnim, {
+      toValue: 0,
+      duration: 180,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) setFiltersVisible(false);
+    });
+  }, [filtersAnim]);
 
   useEffect(() => {
     if (selectedBusiness) {
@@ -87,6 +145,60 @@ export default function MapScreen() {
       bottomSheetRef.current?.close();
     }
   }, [selectedBusiness]);
+
+  // Fetch vibe checks when a business is selected
+  useEffect(() => {
+    if (!selectedBusiness) {
+      setVibeChecks([]);
+      setShowVibeForm(false);
+      setVibeRating(0);
+      setVibeComment('');
+      return;
+    }
+
+    setVibeLoading(true);
+    supabase
+      .from('vibe_checks')
+      .select('*')
+      .eq('business_id', selectedBusiness.id)
+      .order('created_at', { ascending: false })
+      .limit(20)
+      .then(({ data, error }) => {
+        if (error) console.warn('Vibe checks fetch error:', error.message);
+        setVibeChecks((data as VibeCheck[]) ?? []);
+        setVibeLoading(false);
+      });
+  }, [selectedBusiness]);
+
+  const handleSubmitVibeCheck = async () => {
+    if (!user || !selectedBusiness || vibeRating === 0) return;
+
+    setVibeSubmitting(true);
+    const { error } = await supabase.from('vibe_checks').insert({
+      business_id: selectedBusiness.id,
+      user_id: user.id,
+      rating: vibeRating,
+      comment: vibeComment.trim() || null,
+    });
+    setVibeSubmitting(false);
+
+    if (error) {
+      Alert.alert('Error', error.message);
+      return;
+    }
+
+    setVibeRating(0);
+    setVibeComment('');
+    setShowVibeForm(false);
+
+    const { data: refreshed } = await supabase
+      .from('vibe_checks')
+      .select('*')
+      .eq('business_id', selectedBusiness.id)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    setVibeChecks((refreshed as VibeCheck[]) ?? []);
+  };
 
   useEffect(() => {
     const fetchBusinesses = async () => {
@@ -147,7 +259,6 @@ export default function MapScreen() {
     };
   }, []);
 
-  // Radar: flash sale proximity check with bounding box pre-filter
   useEffect(() => {
     if (!userLocation) return;
 
@@ -182,7 +293,6 @@ export default function MapScreen() {
     }
   }, [userLocation, businesses]);
 
-  // Geofencing: register the 20 nearest businesses as geofence regions
   useEffect(() => {
     if (!userLocation || businesses.length === 0) return;
 
@@ -256,6 +366,19 @@ export default function MapScreen() {
     setSaleFilterIds(ids);
   }, [nearbySales]);
 
+  const handleRecenter = useCallback(() => {
+    if (!userLocation) return;
+    mapRef.current?.animateToRegion(
+      {
+        latitude: userLocation.latitude,
+        longitude: userLocation.longitude,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      },
+      500
+    );
+  }, [userLocation]);
+
   const filteredBusinesses = useMemo(() => {
     if (saleFilterIds) {
       return businesses.filter((b) => saleFilterIds.includes(b.id));
@@ -272,6 +395,11 @@ export default function MapScreen() {
       return true;
     });
   }, [businesses, activeFilters, debouncedSearchQuery, saleFilterIds]);
+
+  const avgRating = useMemo(() => {
+    if (vibeChecks.length === 0) return 0;
+    return vibeChecks.reduce((sum, v) => sum + v.rating, 0) / vibeChecks.length;
+  }, [vibeChecks]);
 
   return (
     <View style={styles.container}>
@@ -318,56 +446,122 @@ export default function MapScreen() {
         })}
       </MapView>
 
-      {/* Search + Filter Chips overlay */}
-      <View style={[styles.topContainer, { top: insets.top + 10 }]} pointerEvents="box-none">
-        <SearchBar value={searchQuery} onChange={setSearchQuery} />
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipRow}
-          style={styles.chipScroll}
+      {/* Top-right Filters Icon Button */}
+      <TouchableOpacity
+        onPress={openFilters}
+        activeOpacity={0.85}
+        style={[styles.filtersFab, { top: insets.top + 12 }]}
+        accessibilityRole="button"
+        accessibilityLabel="Open filters"
+      >
+        <Ionicons name="filter" size={18} color="#FFFFFF" />
+      </TouchableOpacity>
+
+      {/* Dedicated Recenter button */}
+      <TouchableOpacity
+        onPress={handleRecenter}
+        activeOpacity={0.85}
+        style={[
+          styles.recenterFab,
+          { bottom: Math.max(insets.bottom, 12) + 12 },
+        ]}
+        disabled={!userLocation}
+        accessibilityRole="button"
+        accessibilityLabel="Recenter map to your location"
+      >
+        <Text style={styles.recenterFabText}>{'\u2316'}</Text>
+      </TouchableOpacity>
+
+      {/* Filters side panel */}
+      <Modal
+        visible={filtersVisible}
+        animationType="none"
+        transparent
+        onRequestClose={closeFilters}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={closeFilters} />
+
+        <Animated.View
+          style={[
+            styles.sidePanel,
+            {
+              paddingTop: insets.top + 10,
+              paddingBottom: Math.max(insets.bottom, 16),
+              transform: [
+                {
+                  translateX: filtersAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [420, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
         >
-          {saleFilterIds && (
+          <View style={styles.sidePanelHeader}>
+            <Text style={styles.modalTitle}>Filters</Text>
             <TouchableOpacity
-              onPress={() => setSaleFilterIds(null)}
-              activeOpacity={0.7}
-              style={[styles.chip, { backgroundColor: '#DC2626' }]}
+              onPress={closeFilters}
+              activeOpacity={0.8}
+              style={styles.iconCloseButton}
+              accessibilityRole="button"
+              accessibilityLabel="Close filters"
             >
-              <Text style={[styles.chipText, { color: '#FFFFFF' }]}>
-                ✕ Clear Sale Filter
-              </Text>
+              <Ionicons name="close" size={20} color="#111827" />
             </TouchableOpacity>
-          )}
-          {CATEGORIES.map((cat) => {
-            const active = activeFilters.includes(cat);
-            const colors = CHIP_COLORS[cat];
-            return (
+          </View>
+
+          <SearchBar value={searchQuery} onChange={setSearchQuery} />
+
+          <Text style={styles.modalSectionLabel}>Categories</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.chipRow}
+            style={styles.chipScroll}
+          >
+            {saleFilterIds && (
               <TouchableOpacity
-                key={cat}
-                onPress={() => toggleFilter(cat)}
+                onPress={() => setSaleFilterIds(null)}
                 activeOpacity={0.7}
-                style={[
-                  styles.chip,
-                  active
-                    ? { backgroundColor: colors.bg }
-                    : styles.chipInactive,
-                ]}
+                style={[styles.chip, { backgroundColor: '#DC2626' }]}
               >
-                <Text
-                  style={[
-                    styles.chipText,
-                    active
-                      ? { color: colors.text }
-                      : styles.chipTextInactive,
-                  ]}
-                >
-                  {cat}
+                <Text style={[styles.chipText, { color: '#FFFFFF' }]}>
+                  {'\u2715'} Clear Sale Filter
                 </Text>
               </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </View>
+            )}
+            {CATEGORIES.map((cat) => {
+              const active = activeFilters.includes(cat);
+              const colors = CHIP_COLORS[cat];
+              return (
+                <TouchableOpacity
+                  key={cat}
+                  onPress={() => toggleFilter(cat)}
+                  activeOpacity={0.7}
+                  style={[
+                    styles.chip,
+                    active
+                      ? { backgroundColor: colors.bg }
+                      : styles.chipInactive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      active
+                        ? { color: colors.text }
+                        : styles.chipTextInactive,
+                    ]}
+                  >
+                    {cat}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </Animated.View>
+      </Modal>
 
       {permissionDenied && (
         <View style={styles.permissionBanner}>
@@ -383,6 +577,7 @@ export default function MapScreen() {
         onShowSales={handleShowSales}
       />
 
+      {/* Business Details Bottom Sheet */}
       <BottomSheet
         ref={bottomSheetRef}
         index={-1}
@@ -392,7 +587,7 @@ export default function MapScreen() {
         backgroundStyle={styles.sheetBackground}
         handleIndicatorStyle={styles.sheetHandle}
       >
-        <BottomSheetView style={styles.sheetContent}>
+        <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
           {selectedBusiness && (
             <>
               <Text style={styles.sheetName}>
@@ -401,7 +596,7 @@ export default function MapScreen() {
 
               {selectedBusiness.flash_sale ? (
                 <Text style={styles.sheetSale}>
-                  🔥 {selectedBusiness.flash_sale}
+                  {'\uD83D\uDD25'} {selectedBusiness.flash_sale}
                 </Text>
               ) : null}
 
@@ -431,7 +626,9 @@ export default function MapScreen() {
                   );
                 }}
               >
-                <Text style={styles.sheetButtonText}>🧭 Get Directions</Text>
+                <Text style={styles.sheetButtonText}>
+                  {'\uD83E\uDDED'} Get Directions
+                </Text>
               </TouchableOpacity>
 
               {selectedBusiness.menu_link?.startsWith('http') ? (
@@ -443,10 +640,133 @@ export default function MapScreen() {
                   <Text style={styles.sheetButtonText}>View Menu</Text>
                 </TouchableOpacity>
               ) : null}
+
+              {/* ── Vibe Checks Section ── */}
+              <View style={styles.vibeSection}>
+                <View style={styles.vibeHeader}>
+                  <Text style={styles.vibeSectionTitle}>Vibe Checks</Text>
+                  {vibeChecks.length > 0 && (
+                    <Text style={styles.vibeAvg}>
+                      {renderStars(avgRating)} ({avgRating.toFixed(1)})
+                    </Text>
+                  )}
+                </View>
+
+                {vibeLoading ? (
+                  <ActivityIndicator
+                    size="small"
+                    color="#6C3AED"
+                    style={{ marginVertical: 12 }}
+                  />
+                ) : vibeChecks.length === 0 ? (
+                  <Text style={styles.vibeEmpty}>
+                    No vibe checks yet. Be the first!
+                  </Text>
+                ) : (
+                  vibeChecks.map((vc) => (
+                    <View key={vc.id} style={styles.vibeCard}>
+                      <View style={styles.vibeCardHeader}>
+                        <Text style={styles.vibeStars}>
+                          {renderStars(vc.rating)}
+                        </Text>
+                        <Text style={styles.vibeDate}>
+                          {formatTimeAgo(vc.created_at)}
+                        </Text>
+                      </View>
+                      {vc.comment ? (
+                        <Text style={styles.vibeComment}>{vc.comment}</Text>
+                      ) : null}
+                    </View>
+                  ))
+                )}
+
+                {user && role === 'customer' && (
+                  <TouchableOpacity
+                    style={styles.vibeCheckBtn}
+                    activeOpacity={0.8}
+                    onPress={() => setShowVibeForm(true)}
+                  >
+                    <Text style={styles.vibeCheckBtnText}>
+                      Leave a Vibe Check
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             </>
           )}
-        </BottomSheetView>
+        </BottomSheetScrollView>
       </BottomSheet>
+
+      {/* Vibe Check Submit Modal */}
+      <Modal
+        visible={showVibeForm}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowVibeForm(false)}
+      >
+        <Pressable
+          style={styles.vibeFormBackdrop}
+          onPress={() => setShowVibeForm(false)}
+        />
+        <View style={styles.vibeFormCard}>
+          <Text style={styles.vibeFormTitle}>Leave a Vibe Check</Text>
+          <Text style={styles.vibeFormBizName} numberOfLines={1}>
+            {selectedBusiness?.business_name}
+          </Text>
+
+          <View style={styles.starPickerRow}>
+            {[1, 2, 3, 4, 5].map((star) => (
+              <TouchableOpacity
+                key={star}
+                onPress={() => setVibeRating(star)}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.starPickerStar,
+                    star <= vibeRating && styles.starPickerStarActive,
+                  ]}
+                >
+                  {star <= vibeRating ? '\u2605' : '\u2606'}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <TextInput
+            style={styles.vibeFormInput}
+            value={vibeComment}
+            onChangeText={setVibeComment}
+            placeholder="What's the vibe? (optional)"
+            placeholderTextColor="#9CA3AF"
+            multiline
+            maxLength={280}
+          />
+
+          <TouchableOpacity
+            style={[
+              styles.vibeFormSubmit,
+              (!vibeRating || vibeSubmitting) && styles.vibeFormSubmitDisabled,
+            ]}
+            onPress={handleSubmitVibeCheck}
+            disabled={!vibeRating || vibeSubmitting}
+            activeOpacity={0.8}
+          >
+            {vibeSubmitting ? (
+              <ActivityIndicator color="#FFF" size="small" />
+            ) : (
+              <Text style={styles.vibeFormSubmitText}>Submit Vibe Check</Text>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.vibeFormCancelBtn}
+            onPress={() => setShowVibeForm(false)}
+          >
+            <Text style={styles.vibeFormCancelText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -454,14 +774,6 @@ export default function MapScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-  },
-  topContainer: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    zIndex: 50,
-    flexDirection: 'column',
-    gap: 12,
   },
   chipScroll: {
     paddingLeft: 12,
@@ -492,6 +804,93 @@ const styles = StyleSheet.create({
   },
   chipTextInactive: {
     color: '#6B7280',
+  },
+  filtersFab: {
+    position: 'absolute',
+    right: 12,
+    zIndex: 80,
+    backgroundColor: '#111827',
+    borderRadius: 999,
+    width: 42,
+    height: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  recenterFab: {
+    position: 'absolute',
+    right: 12,
+    zIndex: 70,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 999,
+    width: 46,
+    height: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  recenterFabText: {
+    color: '#111827',
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  sidePanel: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: '60%',
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 18,
+    borderBottomLeftRadius: 18,
+    paddingHorizontal: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: -6, height: 0 },
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    elevation: 22,
+  },
+  sidePanelHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  iconCloseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 999,
+    backgroundColor: '#F3F4F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalSectionLabel: {
+    marginTop: 12,
+    marginBottom: 8,
+    color: '#374151',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
   },
   permissionBanner: {
     position: 'absolute',
@@ -591,5 +990,156 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     letterSpacing: 0.3,
+  },
+
+  /* Vibe Checks */
+  vibeSection: {
+    marginTop: 20,
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+    paddingTop: 16,
+  },
+  vibeHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  vibeSectionTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  vibeAvg: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#F59E0B',
+  },
+  vibeEmpty: {
+    fontSize: 13,
+    color: '#9CA3AF',
+    textAlign: 'center',
+    paddingVertical: 12,
+  },
+  vibeCard: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#F3F4F6',
+  },
+  vibeCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  vibeStars: {
+    fontSize: 13,
+    color: '#F59E0B',
+  },
+  vibeDate: {
+    fontSize: 11,
+    color: '#9CA3AF',
+  },
+  vibeComment: {
+    fontSize: 13,
+    color: '#4B5563',
+    lineHeight: 18,
+    marginTop: 2,
+  },
+  vibeCheckBtn: {
+    marginTop: 10,
+    backgroundColor: '#7C3AED',
+    borderRadius: 12,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  vibeCheckBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+
+  /* Vibe Check Form Modal */
+  vibeFormBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  vibeFormCard: {
+    position: 'absolute',
+    left: 20,
+    right: 20,
+    top: '25%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 20,
+  },
+  vibeFormTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#111827',
+    marginBottom: 4,
+  },
+  vibeFormBizName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#6C3AED',
+    marginBottom: 16,
+  },
+  starPickerRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 16,
+  },
+  starPickerStar: {
+    fontSize: 34,
+    color: '#D1D5DB',
+  },
+  starPickerStarActive: {
+    color: '#F59E0B',
+  },
+  vibeFormInput: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: '#1F2937',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    minHeight: 80,
+    textAlignVertical: 'top',
+    marginBottom: 14,
+  },
+  vibeFormSubmit: {
+    backgroundColor: '#6C3AED',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  vibeFormSubmitDisabled: {
+    opacity: 0.5,
+  },
+  vibeFormSubmitText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  vibeFormCancelBtn: {
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  vibeFormCancelText: {
+    color: '#6B7280',
+    fontWeight: '600',
+    fontSize: 14,
   },
 });

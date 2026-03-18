@@ -24,13 +24,7 @@ export function SearchBar({ value, onChange }: SearchBarProps) {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    position: 'absolute',
-    top: 54,
-    left: 12,
-    right: 12,
-    zIndex: 50,
-  },
+  container: {},
   input: {
     backgroundColor: '#FFFFFF',
     borderRadius: 12,

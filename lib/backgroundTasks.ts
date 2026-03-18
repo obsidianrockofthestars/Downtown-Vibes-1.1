@@ -22,23 +22,25 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
   };
 
   if (eventType !== Location.GeofencingEventType.Enter) return;
+  const regionId = region?.identifier;
+  if (!regionId) return;
 
   try {
     const raw = await AsyncStorage.getItem(DISMISSED_KEY);
     const dismissed: string[] = raw ? JSON.parse(raw) : [];
 
-    if (dismissed.includes(region.identifier)) return;
+    if (dismissed.includes(regionId)) return;
 
     await Notifications.scheduleNotificationAsync({
       content: {
         title: 'Downtown Vibes Alert!',
         body: 'You are near a spot! Open the app to check for deals.',
-        data: { regionId: region.identifier },
+        data: { regionId },
       },
       trigger: null,
     });
 
-    dismissed.push(region.identifier);
+    dismissed.push(regionId);
     await AsyncStorage.setItem(DISMISSED_KEY, JSON.stringify(dismissed));
   } catch (err) {
     console.warn('Geofence notification error:', err);

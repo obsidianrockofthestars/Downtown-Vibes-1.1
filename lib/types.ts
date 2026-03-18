@@ -15,3 +15,14 @@ export interface Business {
   website: string | null;
   description: string | null;
 }
+
+export interface VibeCheck {
+  id: string;
+  created_at: string;
+  business_id: string;
+  user_id: string;
+  rating: number;
+  comment: string | null;
+}
+
+export type UserRole = 'owner' | 'customer';

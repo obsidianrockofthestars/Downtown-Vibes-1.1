@@ -1,11 +1,14 @@
 import { Tabs } from 'expo-router';
-import { Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // @ts-ignore
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { useAuth } from '@/context/AuthContext';
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
+  const { user, role } = useAuth();
+
+  const isCustomer = !!user && role === 'customer';
 
   return (
     <Tabs
@@ -45,10 +48,22 @@ export default function TabLayout() {
       <Tabs.Screen
         name="login"
         options={{
-          title: 'Account',
-          headerTitle: 'Account',
+          title: user ? 'Business' : 'Account',
+          headerTitle: user ? 'Business' : 'Account',
+          href: isCustomer ? null : undefined,
           tabBarIcon: ({ color, size }: any) => (
-            <Ionicons name="person-circle" size={size} color={color} />
+            <Ionicons name="storefront-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="profile"
+        options={{
+          title: 'Profile',
+          headerTitle: 'Profile',
+          href: isCustomer ? undefined : null,
+          tabBarIcon: ({ color, size }: any) => (
+            <Ionicons name="person-circle-outline" size={size} color={color} />
           ),
         }}
       />
