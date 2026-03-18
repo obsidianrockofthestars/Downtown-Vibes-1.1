@@ -4,7 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useAuth } from '@/context/AuthContext';
 
-export default function TabLayout() {
+function TabLayout() {
   const insets = useSafeAreaInsets();
   const { user, role } = useAuth();
 
@@ -70,3 +70,5 @@ export default function TabLayout() {
     </Tabs>
   );
 }
+
+export default TabLayout;

@@ -1,7 +1,8 @@
 import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
-import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 
 export const GEOFENCE_TASK = 'GEOFENCE_TASK';
 const DISMISSED_KEY = 'geofence_dismissed';
@@ -26,6 +27,12 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
   if (!regionId) return;
 
   try {
+    const isExpoGoAndroid = Platform.OS === 'android' && !!Constants.expoGoConfig;
+    // Expo Go removed remote push support on Android; skip notification scheduling here.
+    if (isExpoGoAndroid) return;
+
+    const Notifications = await import('expo-notifications');
+
     const raw = await AsyncStorage.getItem(DISMISSED_KEY);
     const dismissed: string[] = raw ? JSON.parse(raw) : [];
 

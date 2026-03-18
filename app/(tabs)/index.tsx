@@ -16,11 +16,11 @@ import {
 } from 'react-native';
 import MapView, { Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
-import * as Notifications from 'expo-notifications';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 // @ts-ignore
 import Ionicons from '@expo/vector-icons/Ionicons';
+import Constants from 'expo-constants';
 import { supabase } from '@/lib/supabase';
 import { Business, VibeCheck } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
@@ -80,7 +80,7 @@ function formatTimeAgo(dateString: string): string {
   return `${weeks}w ago`;
 }
 
-export default function MapScreen() {
+function MapScreen() {
   const insets = useSafeAreaInsets();
   const { user, role } = useAuth();
 
@@ -241,7 +241,13 @@ export default function MapScreen() {
         console.warn('Background location denied — geofencing disabled');
       }
 
-      await Notifications.requestPermissionsAsync();
+      // Expo Go removed Android remote push support (SDK 53+).
+      // Avoid importing `expo-notifications` in that environment.
+      const isExpoGoAndroid = Platform.OS === 'android' && !!Constants.expoGoConfig;
+      if (!isExpoGoAndroid) {
+        const Notifications = await import('expo-notifications');
+        await Notifications.requestPermissionsAsync();
+      }
 
       sub = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.Balanced, distanceInterval: 15 },
@@ -1143,3 +1149,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 });
+
+export default MapScreen;

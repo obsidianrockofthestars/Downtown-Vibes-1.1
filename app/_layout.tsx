@@ -1,28 +1,18 @@
 import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import * as Notifications from 'expo-notifications';
 import Purchases, { LOG_LEVEL } from 'react-native-purchases';
 import { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import '../lib/backgroundTasks';
 import { clearDismissedGeofences } from '../lib/backgroundTasks';
 
 const RC_APPLE_KEY = process.env.EXPO_PUBLIC_RC_APPLE_KEY ?? '';
 const RC_GOOGLE_KEY = process.env.EXPO_PUBLIC_RC_GOOGLE_KEY ?? '';
-
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -68,7 +58,7 @@ function RootInner() {
   );
 }
 
-export default function RootLayout() {
+function RootLayout() {
   const [loaded, error] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
   });
@@ -81,12 +71,35 @@ export default function RootLayout() {
     if (loaded) {
       SplashScreen.hideAsync();
 
-      if (Platform.OS === 'android') {
-        Notifications.setNotificationChannelAsync('default', {
-          name: 'default',
-          importance: Notifications.AndroidImportance.MAX,
+      (async () => {
+        // Expo Go removed remote push support on Android (SDK 53+).
+        // Avoid loading `expo-notifications` in that environment to prevent crashes.
+        const isExpoGoAndroid =
+          Platform.OS === 'android' && !!Constants.expoGoConfig;
+        if (isExpoGoAndroid) return;
+
+        const Notifications = await import('expo-notifications');
+
+        Notifications.setNotificationHandler({
+          handleNotification: async () => ({
+            shouldShowAlert: true,
+            shouldShowBanner: true,
+            shouldShowList: true,
+            shouldPlaySound: true,
+            shouldSetBadge: false,
+          }),
         });
-      }
+
+        if (Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('default', {
+            name: 'default',
+            importance: Notifications.AndroidImportance.MAX,
+          });
+        }
+      })().catch((err) => {
+        // Non-fatal; notifications can be disabled in some environments.
+        console.warn('Notifications init failed:', err);
+      });
     }
   }, [loaded]);
 
@@ -100,3 +113,5 @@ export default function RootLayout() {
     </GestureHandlerRootView>
   );
 }
+
+export default RootLayout;
