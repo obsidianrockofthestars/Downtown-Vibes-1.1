@@ -3,7 +3,7 @@ import {
   StyleSheet,
   View,
   Text,
-  ScrollView,
+  Image,
   TouchableOpacity,
   Linking,
   Alert,
@@ -14,7 +14,7 @@ import {
   TextInput,
   ActivityIndicator,
 } from 'react-native';
-import MapView, { Marker, UrlTile } from 'react-native-maps';
+import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -36,28 +36,29 @@ const MAX_GEOFENCE_REGIONS = 20;
 const RADAR_RADIUS_MILES = 0.15;
 const BBOX_DEGREES = 0.0025;
 
-const CATEGORIES = ['restaurant', 'bar', 'store', 'traveling'] as const;
+const CATEGORIES = ['restaurant', 'bar', 'retail', 'traveling'] as const;
 
 const CHIP_COLORS: Record<string, { bg: string; text: string }> = {
   restaurant: { bg: '#22C55E', text: '#FFFFFF' },
   bar: { bg: '#3B82F6', text: '#FFFFFF' },
-  store: { bg: '#EF4444', text: '#FFFFFF' },
+  retail: { bg: '#EF4444', text: '#FFFFFF' },
   traveling: { bg: '#F97316', text: '#FFFFFF' },
 };
 
-function getPinColor(type: string): string {
-  switch (type.toLowerCase()) {
+function getPinImage(type: string) {
+  const t = type.toLowerCase();
+  switch (t) {
     case 'restaurant':
-      return 'green';
+      return require('@/assets/pins/pin-restaurant.png');
     case 'bar':
-      return 'blue';
+      return require('@/assets/pins/pin-bar.png');
     case 'store':
     case 'retail':
-      return 'red';
+      return require('@/assets/pins/pin-store.png');
     case 'traveling':
-      return 'orange';
+      return require('@/assets/pins/pin-default.png');
     default:
-      return 'violet';
+      return require('@/assets/pins/pin-default.png');
   }
 }
 
@@ -97,11 +98,10 @@ function MapScreen() {
   const [activeFilters, setActiveFilters] = useState<string[]>([
     'restaurant',
     'bar',
-    'store',
+    'retail',
     'traveling',
   ]);
-  const [sortBy, setSortBy] = useState<'default' | 'vibe' | 'distance'>('default');
-  const [vibeAvgByBusinessId, setVibeAvgByBusinessId] = useState<Record<string, number>>({});
+  const [activeSort, setActiveSort] = useState<'default' | 'closest'>('default');
   const [nearbySales, setNearbySales] = useState<NearbySale[]>([]);
   const [saleFilterIds, setSaleFilterIds] = useState<string[] | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
@@ -253,31 +253,6 @@ function MapScreen() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
-
-  // Aggregate average vibe check rating per business (for "Highest Vibe" sort)
-  useEffect(() => {
-    supabase
-      .from('vibe_checks')
-      .select('business_id, rating')
-      .then(({ data, error }) => {
-        if (error) {
-          console.warn('Vibe aggregates fetch error:', error.message);
-          return;
-        }
-        const byId: Record<string, { sum: number; count: number }> = {};
-        for (const row of data ?? []) {
-          const id = row.business_id;
-          if (!byId[id]) byId[id] = { sum: 0, count: 0 };
-          byId[id].sum += row.rating;
-          byId[id].count += 1;
-        }
-        const avg: Record<string, number> = {};
-        for (const [id, { sum, count }] of Object.entries(byId)) {
-          avg[id] = sum / count;
-        }
-        setVibeAvgByBusinessId(avg);
-      });
   }, []);
 
   useEffect(() => {
@@ -498,55 +473,56 @@ function MapScreen() {
     favoriteLoading,
   ]);
 
-  const filteredBusinesses = useMemo(() => {
-    let list: Business[];
+  const baseFilteredBusinesses = useMemo(() => {
     if (saleFilterIds) {
-      list = businesses.filter((b) => saleFilterIds.includes(b.id));
-    } else {
-      const q = debouncedSearchQuery.trim().toLowerCase();
-      list = businesses.filter((b) => {
-        const type = (b.business_type ?? '').toLowerCase();
-        const name = (b.business_name ?? '').toLowerCase();
-        if (!activeFilters.includes(type)) return false;
-        if (q) return name.includes(q) || type.includes(q);
-        return true;
-      });
+      return businesses.filter((b) => saleFilterIds.includes(b.id));
     }
 
-    if (sortBy === 'distance' && userLocation) {
-      return [...list].sort(
-        (a, b) =>
-          haversineDistance(
-            userLocation.latitude,
-            userLocation.longitude,
-            a.latitude,
-            a.longitude
-          ) -
-          haversineDistance(
-            userLocation.latitude,
-            userLocation.longitude,
-            b.latitude,
-            b.longitude
-          )
-      );
-    }
-    if (sortBy === 'vibe') {
-      return [...list].sort((a, b) => {
-        const avgA = vibeAvgByBusinessId[a.id] ?? 0;
-        const avgB = vibeAvgByBusinessId[b.id] ?? 0;
-        return avgB - avgA;
+    const q = debouncedSearchQuery.trim().toLowerCase();
+    return businesses.filter((b) => {
+      const type = (b.business_type ?? '').toLowerCase();
+      const name = (b.business_name ?? '').toLowerCase();
+
+      const matchesActiveCategory = activeFilters.some((active) => {
+        // UX requirement: retail should match both `retail` and legacy `store`.
+        if (active === 'retail') return type === 'retail' || type === 'store';
+        return type === active;
       });
+
+      if (!matchesActiveCategory) return false;
+      if (q) return name.includes(q) || type.includes(q);
+      return true;
+    });
+  }, [businesses, activeFilters, debouncedSearchQuery, saleFilterIds]);
+
+  const closestTop3WithDistance = useMemo(() => {
+    if (!userLocation) return [];
+
+    return baseFilteredBusinesses
+      .map((b) => ({
+        business: b,
+        dist: haversineDistance(
+          userLocation.latitude,
+          userLocation.longitude,
+          b.latitude,
+          b.longitude
+        ),
+      }))
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, 3);
+  }, [baseFilteredBusinesses, userLocation]);
+
+  const filteredBusinesses = useMemo(() => {
+    if (activeSort === 'closest' && userLocation) {
+      return closestTop3WithDistance.map((x) => x.business);
     }
-    return list;
-  }, [
-    businesses,
-    activeFilters,
-    debouncedSearchQuery,
-    saleFilterIds,
-    sortBy,
-    userLocation,
-    vibeAvgByBusinessId,
-  ]);
+    return baseFilteredBusinesses;
+  }, [activeSort, userLocation, closestTop3WithDistance, baseFilteredBusinesses]);
+
+  const formatMiles = (miles: number) => {
+    const rounded = Math.round(miles * 10) / 10;
+    return `${rounded.toFixed(1)} mi`;
+  };
 
   const avgRating = useMemo(() => {
     if (vibeChecks.length === 0) return 0;
@@ -564,16 +540,12 @@ function MapScreen() {
           latitudeDelta: 0.05,
           longitudeDelta: 0.05,
         }}
+        provider="google"
         showsUserLocation
         showsMyLocationButton
         onPress={() => setSelectedBusiness(null)}
       >
         {/* Map press only dismisses bottom sheet; markers handle their own onPress */}
-        <UrlTile
-          urlTemplate="https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
-          maximumZ={19}
-          flipY={false}
-        />
         {filteredBusinesses.map((biz) => {
           const hasEmoji = !!biz.emoji_icon?.trim();
           return (
@@ -583,18 +555,15 @@ function MapScreen() {
                 latitude: biz.latitude,
                 longitude: biz.longitude,
               }}
-              pinColor={hasEmoji ? undefined : getPinColor(biz.business_type)}
-              tracksViewChanges={false}
+              image={hasEmoji ? undefined : getPinImage(biz.business_type)}
               onPress={(e) => {
                 e.stopPropagation();
                 setSelectedBusiness(biz);
               }}
             >
               {hasEmoji && (
-                <View style={{ padding: 10 }}>
-                  <View style={styles.emojiBadge}>
-                    <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
-                  </View>
+                <View style={styles.emojiBadge}>
+                  <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
                 </View>
               )}
             </Marker>
@@ -671,64 +640,93 @@ function MapScreen() {
           <SearchBar value={searchQuery} onChange={setSearchQuery} />
 
           <Text style={styles.modalSectionLabel}>Sort By</Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={[styles.chipRow, styles.chipRowAlign]}
-            style={styles.chipScroll}
-          >
-            {(['default', 'vibe', 'distance'] as const).map((key) => {
-              const label =
-                key === 'default'
-                  ? 'Default'
-                  : key === 'vibe'
-                    ? 'Highest Vibe'
-                    : 'Closest to me';
-              const active = sortBy === key;
-              return (
-                <TouchableOpacity
-                  key={key}
-                  onPress={() => setSortBy(key)}
-                  activeOpacity={0.7}
-                  style={[
-                    styles.chip,
-                    styles.chipSelfStart,
-                    active
-                      ? { backgroundColor: '#6C3AED' }
-                      : styles.chipInactive,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.chipText,
-                      active ? { color: '#FFFFFF' } : styles.chipTextInactive,
-                    ]}
-                  >
-                    {label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
+          <View style={styles.sortBtnRow}>
+            <TouchableOpacity
+              onPress={() => setActiveSort('default')}
+              activeOpacity={0.8}
+              style={[styles.sortBtn, activeSort === 'default' && styles.sortBtnActive]}
+              accessibilityRole="button"
+              accessibilityLabel="Sort default"
+            >
+              <Text
+                style={[
+                  styles.sortBtnText,
+                  activeSort === 'default' && styles.sortBtnTextActive,
+                ]}
+              >
+                Default
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => setActiveSort('closest')}
+              activeOpacity={0.8}
+              disabled={!userLocation}
+              style={[styles.sortBtn, activeSort === 'closest' && styles.sortBtnActive, !userLocation && styles.sortBtnDisabled]}
+              accessibilityRole="button"
+              accessibilityLabel="Sort closest"
+            >
+              <Text
+                style={[
+                  styles.sortBtnText,
+                  activeSort === 'closest' && styles.sortBtnTextActive,
+                ]}
+              >
+                Closest
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {activeSort === 'closest' && userLocation && (
+            <View style={styles.closestList}>
+              {closestTop3WithDistance.length === 0 ? (
+                <Text style={styles.closestEmptyText}>No nearby pins found.</Text>
+              ) : (
+                closestTop3WithDistance.map(({ business, dist }) => (
+                  <View key={business.id} style={styles.closestRow}>
+                    <View style={styles.closestRowText}>
+                      <Text style={styles.closestName} numberOfLines={1}>
+                        {business.business_name}
+                      </Text>
+                      <Text style={styles.closestDistance}>
+                        {formatMiles(dist)}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.closestViewBtn}
+                      activeOpacity={0.85}
+                      onPress={() => {
+                        setSelectedBusiness(business);
+                        closeFilters();
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`View ${business.business_name}`}
+                    >
+                      <Text style={styles.closestViewBtnText}>View</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))
+              )}
+            </View>
+          )}
 
           <Text style={styles.modalSectionLabel}>Categories</Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={[styles.chipRow, styles.chipRowAlign]}
-            style={styles.chipScroll}
-          >
-            {saleFilterIds && (
-              <TouchableOpacity
-                onPress={() => setSaleFilterIds(null)}
-                activeOpacity={0.7}
-                style={[styles.chip, styles.chipSelfStart, { backgroundColor: '#DC2626' }]}
-              >
-                <Text style={[styles.chipText, { color: '#FFFFFF' }]}>
-                  {'\u2715'} Clear Sale Filter
-                </Text>
-              </TouchableOpacity>
-            )}
+
+          {saleFilterIds && (
+            <TouchableOpacity
+              onPress={() => setSaleFilterIds(null)}
+              activeOpacity={0.8}
+              style={styles.clearSaleFilterBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Clear sale filter"
+            >
+              <Text style={styles.clearSaleFilterText}>
+                {'\u2715'} Clear Sale Filter
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          <View style={styles.categoryGrid}>
             {CATEGORIES.map((cat) => {
               const active = activeFilters.includes(cat);
               const colors = CHIP_COLORS[cat];
@@ -736,21 +734,20 @@ function MapScreen() {
                 <TouchableOpacity
                   key={cat}
                   onPress={() => toggleFilter(cat)}
-                  activeOpacity={0.7}
+                  activeOpacity={0.8}
                   style={[
-                    styles.chip,
-                    styles.chipSelfStart,
-                    active
-                      ? { backgroundColor: colors.bg }
-                      : styles.chipInactive,
+                    styles.categoryBox,
+                    active && { backgroundColor: colors.bg, borderColor: colors.bg },
+                    !active && styles.categoryBoxInactive,
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Filter ${cat}`}
                 >
                   <Text
                     style={[
-                      styles.chipText,
-                      active
-                        ? { color: colors.text }
-                        : styles.chipTextInactive,
+                      styles.categoryBoxText,
+                      active && { color: colors.text },
+                      !active && styles.categoryBoxTextInactive,
                     ]}
                   >
                     {cat}
@@ -758,7 +755,7 @@ function MapScreen() {
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
+          </View>
         </Animated.View>
       </Modal>
 
@@ -786,6 +783,14 @@ function MapScreen() {
         backgroundStyle={styles.sheetBackground}
         handleIndicatorStyle={styles.sheetHandle}
       >
+        <Image
+          source={require('@/assets/images/watermark.png')}
+          style={[
+            StyleSheet.absoluteFillObject,
+            { opacity: 0.05, resizeMode: 'cover', zIndex: 0 },
+          ]}
+          {...({ pointerEvents: 'none' } as any)}
+        />
         <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
           {selectedBusiness && (
             <>
@@ -1074,6 +1079,134 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginLeft: 8,
   },
+  /* Sort By */
+  sortBtnRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 8,
+    marginBottom: 10,
+  },
+  sortBtn: {
+    flex: 1,
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sortBtnActive: {
+    backgroundColor: '#6C3AED',
+    borderColor: '#6C3AED',
+  },
+  sortBtnDisabled: {
+    opacity: 0.6,
+  },
+  sortBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#6B7280',
+  },
+  sortBtnTextActive: {
+    color: '#FFFFFF',
+  },
+
+  /* Closest list */
+  closestList: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    marginBottom: 14,
+  },
+  closestEmptyText: {
+    color: '#6B7280',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  closestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
+  },
+  closestRowText: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  closestName: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  closestDistance: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6B7280',
+    marginTop: 2,
+  },
+  closestViewBtn: {
+    backgroundColor: '#6C3AED',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closestViewBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+
+  /* Categories grid */
+  clearSaleFilterBtn: {
+    backgroundColor: '#DC2626',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  clearSaleFilterText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  categoryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  categoryBox: {
+    width: '48%',
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  categoryBoxInactive: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#D1D5DB',
+  },
+  categoryBoxText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    textTransform: 'capitalize',
+  },
+  categoryBoxTextInactive: {
+    color: '#6B7280',
+  },
   recenterFab: {
     position: 'absolute',
     right: 12,
@@ -1198,6 +1331,8 @@ const styles = StyleSheet.create({
   sheetContent: {
     paddingHorizontal: 24,
     paddingBottom: 36,
+    position: 'relative',
+    zIndex: 1,
   },
   sheetName: {
     fontSize: 20,
