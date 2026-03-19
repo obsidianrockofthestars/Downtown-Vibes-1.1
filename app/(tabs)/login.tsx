@@ -19,6 +19,7 @@ import * as Crypto from 'expo-crypto';
 import Purchases from 'react-native-purchases';
 import RevenueCatUI from 'react-native-purchases-ui';
 import { useAuth } from '@/context/AuthContext';
+import { isRunningInExpoGo } from '@/lib/expoGo';
 import { supabase } from '@/lib/supabase';
 import { Business, UserRole } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
@@ -144,7 +145,7 @@ export default function LoginScreen() {
       return;
     }
 
-    if (!demoBypass) {
+    if (!demoBypass && !isRunningInExpoGo) {
       try {
         const { count, error: countErr } = await supabase
           .from('businesses')
@@ -488,7 +489,7 @@ export default function LoginScreen() {
         <Text style={styles.customerRedirectEmoji}>✨</Text>
         <Text style={styles.customerRedirectTitle}>You're signed in!</Text>
         <Text style={styles.customerRedirectSub}>
-          Head to the Profile tab to manage your account and Vibe Checks.
+          Head to the Account tab to manage your account and Vibe Checks.
         </Text>
       </View>
     );
@@ -653,6 +654,13 @@ export default function LoginScreen() {
           <TouchableOpacity
             style={styles.manageSubBtn}
             onPress={() => {
+              if (isRunningInExpoGo) {
+                Alert.alert(
+                  'Expo Go',
+                  'Subscription management is not available in Expo Go. Use a development build to test RevenueCat.'
+                );
+                return;
+              }
               RevenueCatUI.presentCustomerCenter().catch(() =>
                 Alert.alert('Error', 'Could not open subscription management.')
               );
@@ -819,18 +827,35 @@ export default function LoginScreen() {
             onRequestClose={() => setShowPaywall(false)}
           >
             <View style={styles.paywallContainer}>
-              <RevenueCatUI.Paywall
-                options={{} as any}
-                onPurchaseCompleted={() => setShowPaywall(false)}
-                onRestoreCompleted={() => setShowPaywall(false)}
-                onDismiss={() => setShowPaywall(false)}
-              />
-              <TouchableOpacity
-                style={styles.paywallCloseBtn}
-                onPress={() => setShowPaywall(false)}
-              >
-                <Text style={styles.paywallCloseBtnText}>Close</Text>
-              </TouchableOpacity>
+              {isRunningInExpoGo ? (
+                <View style={styles.paywallContainer}>
+                  <Text style={styles.paywallExpoGoTitle}>Paywall (Expo Go)</Text>
+                  <Text style={styles.paywallExpoGoText}>
+                    RevenueCat paywall is disabled in Expo Go. Use a dev build to test purchases.
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.paywallCloseBtn}
+                    onPress={() => setShowPaywall(false)}
+                  >
+                    <Text style={styles.paywallCloseBtnText}>Close</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <>
+                  <RevenueCatUI.Paywall
+                    options={{} as any}
+                    onPurchaseCompleted={() => setShowPaywall(false)}
+                    onRestoreCompleted={() => setShowPaywall(false)}
+                    onDismiss={() => setShowPaywall(false)}
+                  />
+                  <TouchableOpacity
+                    style={styles.paywallCloseBtn}
+                    onPress={() => setShowPaywall(false)}
+                  >
+                    <Text style={styles.paywallCloseBtnText}>Close</Text>
+                  </TouchableOpacity>
+                </>
+              )}
             </View>
           </Modal>
         </ScrollView>
@@ -1370,6 +1395,22 @@ const styles = StyleSheet.create({
   paywallContainer: {
     flex: 1,
     backgroundColor: '#FFFFFF',
+  },
+  paywallExpoGoTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1F2937',
+    marginTop: 48,
+    marginHorizontal: 24,
+    textAlign: 'center',
+  },
+  paywallExpoGoText: {
+    fontSize: 15,
+    color: '#6B7280',
+    marginTop: 12,
+    marginHorizontal: 24,
+    textAlign: 'center',
+    lineHeight: 22,
   },
   paywallCloseBtn: {
     backgroundColor: '#F3F4F6',

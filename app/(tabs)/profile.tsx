@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
-import { VibeCheck } from '@/lib/types';
+import { Business, VibeCheck } from '@/lib/types';
 
 interface VibeCheckWithBiz extends VibeCheck {
   business_name: string;
@@ -29,10 +29,15 @@ function formatDate(dateString: string): string {
   });
 }
 
+type ProfileTab = 'vibe' | 'favorites';
+
 export default function ProfileScreen() {
   const { user, role, signOut } = useAuth();
+  const [tab, setTab] = useState<ProfileTab>('vibe');
   const [checks, setChecks] = useState<VibeCheckWithBiz[]>([]);
+  const [favorites, setFavorites] = useState<Business[]>([]);
   const [loading, setLoading] = useState(true);
+  const [favoritesLoading, setFavoritesLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchVibeChecks = useCallback(async () => {
@@ -73,13 +78,50 @@ export default function ProfileScreen() {
     setLoading(false);
   }, [user]);
 
+  const fetchFavorites = useCallback(async () => {
+    if (!user) {
+      setFavorites([]);
+      setFavoritesLoading(false);
+      return;
+    }
+    setFavoritesLoading(true);
+    const { data: rows, error } = await supabase
+      .from('user_favorites')
+      .select('*, businesses(*)')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Favorites fetch error:', error);
+      setFavorites([]);
+      setFavoritesLoading(false);
+      return;
+    }
+
+    const list: Business[] = [];
+    for (const row of rows ?? []) {
+      const r = row as { businesses?: Business | null; business?: Business | null };
+      const biz = r.businesses ?? r.business ?? null;
+      if (biz && typeof biz === 'object' && biz.id) {
+        list.push(biz as Business);
+      }
+    }
+    setFavorites(list);
+    setFavoritesLoading(false);
+  }, [user]);
+
   useEffect(() => {
     fetchVibeChecks();
   }, [fetchVibeChecks]);
 
+  useEffect(() => {
+    fetchFavorites();
+  }, [fetchFavorites]);
+
   const handleRefresh = async () => {
     setRefreshing(true);
-    await fetchVibeChecks();
+    if (tab === 'vibe') await fetchVibeChecks();
+    else await fetchFavorites();
     setRefreshing(false);
   };
 
@@ -119,37 +161,109 @@ export default function ProfileScreen() {
         </View>
       </View>
 
-      <Text style={styles.sectionTitle}>Your Vibe Checks</Text>
-
-      {loading ? (
-        <ActivityIndicator
-          size="large"
-          color="#6C3AED"
-          style={{ marginTop: 24 }}
-        />
-      ) : checks.length === 0 ? (
-        <View style={styles.emptyCard}>
-          <Text style={styles.emptyEmoji}>🔍</Text>
-          <Text style={styles.emptyTitle}>No Vibe Checks yet</Text>
-          <Text style={styles.emptySubtext}>
-            Tap a business on the map to leave your first review!
+      <View style={styles.segmentRow}>
+        <TouchableOpacity
+          style={[styles.segmentBtn, tab === 'vibe' && styles.segmentBtnActive]}
+          onPress={() => setTab('vibe')}
+          activeOpacity={0.8}
+        >
+          <Text
+            style={[
+              styles.segmentBtnText,
+              tab === 'vibe' && styles.segmentBtnTextActive,
+            ]}
+          >
+            My Vibe Checks
           </Text>
-        </View>
-      ) : (
-        checks.map((vc) => (
-          <View key={vc.id} style={styles.checkCard}>
-            <View style={styles.checkHeader}>
-              <Text style={styles.checkBizName} numberOfLines={1}>
-                {vc.business_name}
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.segmentBtn, tab === 'favorites' && styles.segmentBtnActive]}
+          onPress={() => setTab('favorites')}
+          activeOpacity={0.8}
+        >
+          <Text
+            style={[
+              styles.segmentBtnText,
+              tab === 'favorites' && styles.segmentBtnTextActive,
+            ]}
+          >
+            My Favorites
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {tab === 'vibe' ? (
+        <>
+          <Text style={styles.sectionTitle}>Your Vibe Checks</Text>
+          {loading ? (
+            <ActivityIndicator
+              size="large"
+              color="#6C3AED"
+              style={{ marginTop: 24 }}
+            />
+          ) : checks.length === 0 ? (
+            <View style={styles.emptyCard}>
+              <Text style={styles.emptyEmoji}>🔍</Text>
+              <Text style={styles.emptyTitle}>No Vibe Checks yet</Text>
+              <Text style={styles.emptySubtext}>
+                Tap a business on the map to leave your first review!
               </Text>
-              <Text style={styles.checkStars}>{renderStars(vc.rating)}</Text>
             </View>
-            {vc.comment ? (
-              <Text style={styles.checkComment}>{vc.comment}</Text>
-            ) : null}
-            <Text style={styles.checkDate}>{formatDate(vc.created_at)}</Text>
-          </View>
-        ))
+          ) : (
+            checks.map((vc) => (
+              <View key={vc.id} style={styles.checkCard}>
+                <View style={styles.checkHeader}>
+                  <Text style={styles.checkBizName} numberOfLines={1}>
+                    {vc.business_name}
+                  </Text>
+                  <Text style={styles.checkStars}>{renderStars(vc.rating)}</Text>
+                </View>
+                {vc.comment ? (
+                  <Text style={styles.checkComment}>{vc.comment}</Text>
+                ) : null}
+                <Text style={styles.checkDate}>{formatDate(vc.created_at)}</Text>
+              </View>
+            ))
+          )}
+        </>
+      ) : (
+        <>
+          <Text style={styles.sectionTitle}>My Favorites</Text>
+          {favoritesLoading ? (
+            <ActivityIndicator
+              size="large"
+              color="#6C3AED"
+              style={{ marginTop: 24 }}
+            />
+          ) : favorites.length === 0 ? (
+            <View style={styles.emptyCard}>
+              <Text style={styles.emptyEmoji}>❤️</Text>
+              <Text style={styles.emptyTitle}>No favorites yet</Text>
+              <Text style={styles.emptySubtext}>
+                Tap the heart on a business on the map to add it here!
+              </Text>
+            </View>
+          ) : (
+            favorites.map((biz) => (
+              <View key={biz.id} style={styles.favCard}>
+                {biz.flash_sale?.trim() ? (
+                  <View style={styles.flashSaleBadge}>
+                    <Text style={styles.flashSaleBadgeText}>
+                      🔥 Active Flash Sale
+                    </Text>
+                  </View>
+                ) : null}
+                <Text style={styles.favCardName} numberOfLines={2}>
+                  {biz.business_name}
+                </Text>
+                <Text style={styles.favCardType}>
+                  {biz.business_type}
+                  {biz.flash_sale?.trim() ? ` · ${biz.flash_sale}` : ''}
+                </Text>
+              </View>
+            ))
+          )}
+        </>
       )}
 
       <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
@@ -226,6 +340,38 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
+  /* Segment control */
+  segmentRow: {
+    flexDirection: 'row',
+    marginBottom: 20,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 12,
+    padding: 4,
+  },
+  segmentBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderRadius: 10,
+  },
+  segmentBtnActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  segmentBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#6B7280',
+  },
+  segmentBtnTextActive: {
+    color: '#6C3AED',
+    fontWeight: '700',
+  },
+
   /* Section */
   sectionTitle: {
     fontSize: 18,
@@ -295,6 +441,44 @@ const styles = StyleSheet.create({
   checkDate: {
     fontSize: 12,
     color: '#9CA3AF',
+  },
+
+  /* Favorites list */
+  favCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    overflow: 'hidden',
+  },
+  flashSaleBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+  },
+  flashSaleBadgeText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#B45309',
+    letterSpacing: 0.3,
+  },
+  favCardName: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1F2937',
+    marginBottom: 4,
+  },
+  favCardType: {
+    fontSize: 13,
+    color: '#6B7280',
+    textTransform: 'capitalize',
   },
 
   /* Sign out */

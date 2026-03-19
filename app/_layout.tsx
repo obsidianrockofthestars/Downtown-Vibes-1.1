@@ -8,6 +8,7 @@ import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
+import { isRunningInExpoGo } from '@/lib/expoGo';
 import '../lib/backgroundTasks';
 import { clearDismissedGeofences } from '../lib/backgroundTasks';
 
@@ -29,6 +30,11 @@ function RootInner() {
   useEffect(() => {
     clearDismissedGeofences();
 
+    if (isRunningInExpoGo) {
+      console.log('Running in Expo Go: Skipping RevenueCat initialization.');
+      return;
+    }
+
     Purchases.setLogLevel(LOG_LEVEL.ERROR);
 
     const key = Platform.OS === 'ios' ? RC_APPLE_KEY : RC_GOOGLE_KEY;
@@ -38,6 +44,8 @@ function RootInner() {
   }, []);
 
   useEffect(() => {
+    if (isRunningInExpoGo) return;
+
     if (user && user.id !== prevUserId.current) {
       prevUserId.current = user.id;
       Purchases.logIn(user.id).catch(() => {});

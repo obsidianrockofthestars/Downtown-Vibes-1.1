@@ -27,6 +27,7 @@ import { haversineDistance } from '@/lib/haversine';
 import { GEOFENCE_TASK } from '@/lib/backgroundTasks';
 import { SearchBar } from '@/components/SearchBar';
 import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
+import { useRouter } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
 
 const GEOFENCE_RADIUS_METERS = 160;
@@ -82,6 +83,7 @@ function formatTimeAgo(dateString: string): string {
 
 function MapScreen() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const { user, role } = useAuth();
 
   const [businesses, setBusinesses] = useState<Business[]>([]);
@@ -98,6 +100,8 @@ function MapScreen() {
     'store',
     'traveling',
   ]);
+  const [sortBy, setSortBy] = useState<'default' | 'vibe' | 'distance'>('default');
+  const [vibeAvgByBusinessId, setVibeAvgByBusinessId] = useState<Record<string, number>>({});
   const [nearbySales, setNearbySales] = useState<NearbySale[]>([]);
   const [saleFilterIds, setSaleFilterIds] = useState<string[] | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
@@ -112,6 +116,11 @@ function MapScreen() {
   const [vibeRating, setVibeRating] = useState(0);
   const [vibeComment, setVibeComment] = useState('');
   const [vibeSubmitting, setVibeSubmitting] = useState(false);
+
+  // Favorites state
+  const [isFavorited, setIsFavorited] = useState(false);
+  const [favoriteLoading, setFavoriteLoading] = useState(false);
+  const [favoriteRowId, setFavoriteRowId] = useState<string | null>(null);
 
   const shownSalesRef = useRef<Set<string>>(new Set());
   const mapRef = useRef<MapView | null>(null);
@@ -170,6 +179,26 @@ function MapScreen() {
       });
   }, [selectedBusiness]);
 
+  // Check if current user has favorited this business
+  useEffect(() => {
+    if (!selectedBusiness || !user || role !== 'customer') {
+      setIsFavorited(false);
+      setFavoriteRowId(null);
+      return;
+    }
+    supabase
+      .from('user_favorites')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('business_id', selectedBusiness.id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (error) console.warn('Favorite check error:', error.message);
+        setIsFavorited(!!data);
+        setFavoriteRowId(data?.id ?? null);
+      });
+  }, [selectedBusiness, user, role]);
+
   const handleSubmitVibeCheck = async () => {
     if (!user || !selectedBusiness || vibeRating === 0) return;
 
@@ -224,6 +253,31 @@ function MapScreen() {
     return () => {
       supabase.removeChannel(channel);
     };
+  }, []);
+
+  // Aggregate average vibe check rating per business (for "Highest Vibe" sort)
+  useEffect(() => {
+    supabase
+      .from('vibe_checks')
+      .select('business_id, rating')
+      .then(({ data, error }) => {
+        if (error) {
+          console.warn('Vibe aggregates fetch error:', error.message);
+          return;
+        }
+        const byId: Record<string, { sum: number; count: number }> = {};
+        for (const row of data ?? []) {
+          const id = row.business_id;
+          if (!byId[id]) byId[id] = { sum: 0, count: 0 };
+          byId[id].sum += row.rating;
+          byId[id].count += 1;
+        }
+        const avg: Record<string, number> = {};
+        for (const [id, { sum, count }] of Object.entries(byId)) {
+          avg[id] = sum / count;
+        }
+        setVibeAvgByBusinessId(avg);
+      });
   }, []);
 
   useEffect(() => {
@@ -385,22 +439,114 @@ function MapScreen() {
     );
   }, [userLocation]);
 
+  const handleToggleFavorite = useCallback(async () => {
+    if (!user || role !== 'customer') {
+      Alert.alert(
+        'Sign in to favorite',
+        'You need a free account to favorite!',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Go to Account', onPress: () => router.push('/(tabs)/account') },
+        ]
+      );
+      return;
+    }
+    if (!selectedBusiness || favoriteLoading) return;
+
+    setFavoriteLoading(true);
+    try {
+      if (isFavorited && favoriteRowId) {
+        const { error } = await supabase
+          .from('user_favorites')
+          .delete()
+          .eq('id', favoriteRowId);
+        if (error) {
+          console.error('Unfavorite error:', error);
+          Alert.alert('Error', error.message);
+          return;
+        }
+        setIsFavorited(false);
+        setFavoriteRowId(null);
+      } else {
+        const { data, error } = await supabase
+          .from('user_favorites')
+          .insert({
+            user_id: user.id,
+            business_id: selectedBusiness.id,
+          })
+          .select('id')
+          .single();
+        if (error) {
+          console.error('Favorite insert error:', error);
+          Alert.alert('Error', error.message);
+          return;
+        }
+        if (data?.id) {
+          setIsFavorited(true);
+          setFavoriteRowId(data.id);
+        }
+      }
+    } finally {
+      setFavoriteLoading(false);
+    }
+  }, [
+    user,
+    role,
+    selectedBusiness,
+    isFavorited,
+    favoriteRowId,
+    favoriteLoading,
+  ]);
+
   const filteredBusinesses = useMemo(() => {
+    let list: Business[];
     if (saleFilterIds) {
-      return businesses.filter((b) => saleFilterIds.includes(b.id));
+      list = businesses.filter((b) => saleFilterIds.includes(b.id));
+    } else {
+      const q = debouncedSearchQuery.trim().toLowerCase();
+      list = businesses.filter((b) => {
+        const type = (b.business_type ?? '').toLowerCase();
+        const name = (b.business_name ?? '').toLowerCase();
+        if (!activeFilters.includes(type)) return false;
+        if (q) return name.includes(q) || type.includes(q);
+        return true;
+      });
     }
 
-    const q = debouncedSearchQuery.trim().toLowerCase();
-
-    return businesses.filter((b) => {
-      const type = (b.business_type ?? '').toLowerCase();
-      const name = (b.business_name ?? '').toLowerCase();
-
-      if (!activeFilters.includes(type)) return false;
-      if (q) return name.includes(q) || type.includes(q);
-      return true;
-    });
-  }, [businesses, activeFilters, debouncedSearchQuery, saleFilterIds]);
+    if (sortBy === 'distance' && userLocation) {
+      return [...list].sort(
+        (a, b) =>
+          haversineDistance(
+            userLocation.latitude,
+            userLocation.longitude,
+            a.latitude,
+            a.longitude
+          ) -
+          haversineDistance(
+            userLocation.latitude,
+            userLocation.longitude,
+            b.latitude,
+            b.longitude
+          )
+      );
+    }
+    if (sortBy === 'vibe') {
+      return [...list].sort((a, b) => {
+        const avgA = vibeAvgByBusinessId[a.id] ?? 0;
+        const avgB = vibeAvgByBusinessId[b.id] ?? 0;
+        return avgB - avgA;
+      });
+    }
+    return list;
+  }, [
+    businesses,
+    activeFilters,
+    debouncedSearchQuery,
+    saleFilterIds,
+    sortBy,
+    userLocation,
+    vibeAvgByBusinessId,
+  ]);
 
   const avgRating = useMemo(() => {
     if (vibeChecks.length === 0) return 0;
@@ -422,6 +568,7 @@ function MapScreen() {
         showsMyLocationButton
         onPress={() => setSelectedBusiness(null)}
       >
+        {/* Map press only dismisses bottom sheet; markers handle their own onPress */}
         <UrlTile
           urlTemplate="https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
           maximumZ={19}
@@ -437,14 +584,17 @@ function MapScreen() {
                 longitude: biz.longitude,
               }}
               pinColor={hasEmoji ? undefined : getPinColor(biz.business_type)}
+              tracksViewChanges={false}
               onPress={(e) => {
                 e.stopPropagation();
                 setSelectedBusiness(biz);
               }}
             >
               {hasEmoji && (
-                <View style={styles.emojiBadge}>
-                  <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
+                <View style={{ padding: 10 }}>
+                  <View style={styles.emojiBadge}>
+                    <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
+                  </View>
                 </View>
               )}
             </Marker>
@@ -452,15 +602,16 @@ function MapScreen() {
         })}
       </MapView>
 
-      {/* Top-right Filters Icon Button */}
+      {/* Top-right Menu (filters) pill button */}
       <TouchableOpacity
         onPress={openFilters}
         activeOpacity={0.85}
         style={[styles.filtersFab, { top: insets.top + 12 }]}
         accessibilityRole="button"
-        accessibilityLabel="Open filters"
+        accessibilityLabel="Open menu"
       >
         <Ionicons name="filter" size={18} color="#FFFFFF" />
+        <Text style={styles.filtersFabText}>Menu</Text>
       </TouchableOpacity>
 
       {/* Dedicated Recenter button */}
@@ -519,18 +670,59 @@ function MapScreen() {
 
           <SearchBar value={searchQuery} onChange={setSearchQuery} />
 
+          <Text style={styles.modalSectionLabel}>Sort By</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={[styles.chipRow, styles.chipRowAlign]}
+            style={styles.chipScroll}
+          >
+            {(['default', 'vibe', 'distance'] as const).map((key) => {
+              const label =
+                key === 'default'
+                  ? 'Default'
+                  : key === 'vibe'
+                    ? 'Highest Vibe'
+                    : 'Closest to me';
+              const active = sortBy === key;
+              return (
+                <TouchableOpacity
+                  key={key}
+                  onPress={() => setSortBy(key)}
+                  activeOpacity={0.7}
+                  style={[
+                    styles.chip,
+                    styles.chipSelfStart,
+                    active
+                      ? { backgroundColor: '#6C3AED' }
+                      : styles.chipInactive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      active ? { color: '#FFFFFF' } : styles.chipTextInactive,
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+
           <Text style={styles.modalSectionLabel}>Categories</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.chipRow}
+            contentContainerStyle={[styles.chipRow, styles.chipRowAlign]}
             style={styles.chipScroll}
           >
             {saleFilterIds && (
               <TouchableOpacity
                 onPress={() => setSaleFilterIds(null)}
                 activeOpacity={0.7}
-                style={[styles.chip, { backgroundColor: '#DC2626' }]}
+                style={[styles.chip, styles.chipSelfStart, { backgroundColor: '#DC2626' }]}
               >
                 <Text style={[styles.chipText, { color: '#FFFFFF' }]}>
                   {'\u2715'} Clear Sale Filter
@@ -547,6 +739,7 @@ function MapScreen() {
                   activeOpacity={0.7}
                   style={[
                     styles.chip,
+                    styles.chipSelfStart,
                     active
                       ? { backgroundColor: colors.bg }
                       : styles.chipInactive,
@@ -615,6 +808,31 @@ function MapScreen() {
                   {selectedBusiness.business_type}
                 </Text>
               )}
+
+              <TouchableOpacity
+                style={styles.favoriteButton}
+                activeOpacity={0.8}
+                onPress={handleToggleFavorite}
+                disabled={favoriteLoading}
+              >
+                {favoriteLoading ? (
+                  <ActivityIndicator size="small" color="#DC2626" />
+                ) : (
+                  <Ionicons
+                    name={isFavorited ? 'heart' : 'heart-outline'}
+                    size={22}
+                    color={isFavorited ? '#DC2626' : '#6B7280'}
+                  />
+                )}
+                <Text
+                  style={[
+                    styles.favoriteButtonText,
+                    isFavorited && styles.favoriteButtonTextActive,
+                  ]}
+                >
+                  {isFavorited ? 'Favorited' : 'Favorite'}
+                </Text>
+              </TouchableOpacity>
 
               <TouchableOpacity
                 style={styles.directionsButton}
@@ -686,17 +904,32 @@ function MapScreen() {
                   ))
                 )}
 
-                {user && role === 'customer' && (
-                  <TouchableOpacity
-                    style={styles.vibeCheckBtn}
-                    activeOpacity={0.8}
-                    onPress={() => setShowVibeForm(true)}
-                  >
-                    <Text style={styles.vibeCheckBtnText}>
-                      Leave a Vibe Check
-                    </Text>
-                  </TouchableOpacity>
-                )}
+                <TouchableOpacity
+                  style={styles.vibeCheckBtn}
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    if (!user || role !== 'customer') {
+                      Alert.alert(
+                        'Sign in to leave a Vibe Check',
+                        'You need a free account to leave a Vibe Check!',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Go to Account',
+                            onPress: () =>
+                              router.push('/(tabs)/account'),
+                          },
+                        ]
+                      );
+                      return;
+                    }
+                    setShowVibeForm(true);
+                  }}
+                >
+                  <Text style={styles.vibeCheckBtnText}>
+                    Leave a Vibe Check
+                  </Text>
+                </TouchableOpacity>
               </View>
             </>
           )}
@@ -788,6 +1021,9 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingRight: 20,
   },
+  chipRowAlign: {
+    alignItems: 'center',
+  },
   chip: {
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -797,6 +1033,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.12,
     shadowRadius: 3,
     elevation: 3,
+  },
+  chipSelfStart: {
+    alignSelf: 'flex-start',
   },
   chipInactive: {
     backgroundColor: '#FFFFFF',
@@ -815,17 +1054,25 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 12,
     zIndex: 80,
-    backgroundColor: '#111827',
-    borderRadius: 999,
-    width: 42,
-    height: 42,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    width: 'auto',
+    backgroundColor: '#111827',
+    borderRadius: 999,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.18,
     shadowRadius: 10,
     elevation: 8,
+  },
+  filtersFabText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+    marginLeft: 8,
   },
   recenterFab: {
     position: 'absolute',
@@ -976,6 +1223,28 @@ const styles = StyleSheet.create({
     color: '#9CA3AF',
     textTransform: 'capitalize',
     marginBottom: 12,
+  },
+  favoriteButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 4,
+    marginBottom: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  favoriteButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6B7280',
+  },
+  favoriteButtonTextActive: {
+    color: '#DC2626',
   },
   directionsButton: {
     marginTop: 8,

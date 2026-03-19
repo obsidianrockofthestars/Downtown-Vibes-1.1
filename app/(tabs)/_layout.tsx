@@ -2,13 +2,9 @@ import { Tabs } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // @ts-ignore
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useAuth } from '@/context/AuthContext';
 
 function TabLayout() {
   const insets = useSafeAreaInsets();
-  const { user, role } = useAuth();
-
-  const isCustomer = !!user && role === 'customer';
 
   return (
     <Tabs
@@ -46,25 +42,25 @@ function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="account"
+        options={{
+          title: 'Account',
+          headerTitle: 'Account',
+          tabBarIcon: ({ color, size }: any) => (
+            <Ionicons name="person-circle-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="login"
         options={{
-          title: user ? 'Business' : 'Account',
-          headerTitle: user ? 'Business' : 'Account',
-          href: isCustomer ? null : undefined,
-          tabBarIcon: ({ color, size }: any) => (
-            <Ionicons name="storefront-outline" size={size} color={color} />
-          ),
+          href: null,
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
-          title: 'Profile',
-          headerTitle: 'Profile',
-          href: isCustomer ? undefined : null,
-          tabBarIcon: ({ color, size }: any) => (
-            <Ionicons name="person-circle-outline" size={size} color={color} />
-          ),
+          href: null,
         }}
       />
     </Tabs>
