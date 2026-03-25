@@ -10,6 +10,10 @@ export interface Business {
   is_active: boolean;
   latitude: number;
   longitude: number;
+  static_latitude?: number | null;
+  static_longitude?: number | null;
+  is_traveling_active?: boolean;
+  account_tier?: 'single' | 'dual';
   business_type: string;
   menu_link: string | null;
   website: string | null;

@@ -4,6 +4,7 @@ import {
   View,
   Text,
   Image,
+  ScrollView,
   TouchableOpacity,
   Linking,
   Alert,
@@ -29,6 +30,7 @@ import { SearchBar } from '@/components/SearchBar';
 import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const GEOFENCE_RADIUS_METERS = 160;
 const MAX_GEOFENCE_REGIONS = 20;
@@ -105,6 +107,7 @@ function MapScreen() {
   const [nearbySales, setNearbySales] = useState<NearbySale[]>([]);
   const [saleFilterIds, setSaleFilterIds] = useState<string[] | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
+  const [showDisclosure, setShowDisclosure] = useState(false);
   const [selectedBusiness, setSelectedBusiness] = useState<Business | null>(
     null
   );
@@ -255,44 +258,64 @@ function MapScreen() {
     };
   }, []);
 
+  const startLocationFlow = useCallback(async () => {
+    const { status: fg } = await Location.requestForegroundPermissionsAsync();
+    if (fg !== 'granted') {
+      setPermissionDenied(true);
+      return null;
+    }
+
+    const { status: bg } = await Location.requestBackgroundPermissionsAsync();
+    if (bg !== 'granted') {
+      console.warn('Background location denied — geofencing disabled');
+    }
+
+    // Expo Go removed Android remote push support (SDK 53+).
+    // Avoid importing `expo-notifications` in that environment.
+    const isExpoGoAndroid = Platform.OS === 'android' && !!Constants.expoGoConfig;
+    if (!isExpoGoAndroid) {
+      const Notifications = await import('expo-notifications');
+      await Notifications.requestPermissionsAsync();
+    }
+
+    return await Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.Balanced, distanceInterval: 15 },
+      (loc) => {
+        setUserLocation({
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+        });
+      }
+    );
+  }, []);
+
+  const acceptDisclosure = useCallback(async () => {
+    await AsyncStorage.setItem('hasSeenLocationDisclosure', 'true');
+    setShowDisclosure(false);
+    await startLocationFlow();
+  }, [startLocationFlow]);
+
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
+    let cancelled = false;
 
     (async () => {
-      const { status: fg } = await Location.requestForegroundPermissionsAsync();
-      if (fg !== 'granted') {
-        setPermissionDenied(true);
+      const hasSeen = await AsyncStorage.getItem('hasSeenLocationDisclosure');
+      if (cancelled) return;
+
+      if (hasSeen !== 'true') {
+        setShowDisclosure(true);
         return;
       }
 
-      const { status: bg } = await Location.requestBackgroundPermissionsAsync();
-      if (bg !== 'granted') {
-        console.warn('Background location denied — geofencing disabled');
-      }
-
-      // Expo Go removed Android remote push support (SDK 53+).
-      // Avoid importing `expo-notifications` in that environment.
-      const isExpoGoAndroid = Platform.OS === 'android' && !!Constants.expoGoConfig;
-      if (!isExpoGoAndroid) {
-        const Notifications = await import('expo-notifications');
-        await Notifications.requestPermissionsAsync();
-      }
-
-      sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.Balanced, distanceInterval: 15 },
-        (loc) => {
-          setUserLocation({
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-          });
-        }
-      );
-    })();
+      sub = await startLocationFlow();
+    })().catch((err) => console.warn('Location init error:', err));
 
     return () => {
+      cancelled = true;
       sub?.remove();
     };
-  }, []);
+  }, [startLocationFlow]);
 
   useEffect(() => {
     if (!userLocation) return;
@@ -495,7 +518,7 @@ function MapScreen() {
     });
   }, [businesses, activeFilters, debouncedSearchQuery, saleFilterIds]);
 
-  const closestTop3WithDistance = useMemo(() => {
+  const closestTop5WithDistance = useMemo(() => {
     if (!userLocation) return [];
 
     return baseFilteredBusinesses
@@ -509,15 +532,15 @@ function MapScreen() {
         ),
       }))
       .sort((a, b) => a.dist - b.dist)
-      .slice(0, 3);
+      .slice(0, 5);
   }, [baseFilteredBusinesses, userLocation]);
 
   const filteredBusinesses = useMemo(() => {
     if (activeSort === 'closest' && userLocation) {
-      return closestTop3WithDistance.map((x) => x.business);
+      return closestTop5WithDistance.map((x) => x.business);
     }
     return baseFilteredBusinesses;
-  }, [activeSort, userLocation, closestTop3WithDistance, baseFilteredBusinesses]);
+  }, [activeSort, userLocation, closestTop5WithDistance, baseFilteredBusinesses]);
 
   const formatMiles = (miles: number) => {
     const rounded = Math.round(miles * 10) / 10;
@@ -531,6 +554,33 @@ function MapScreen() {
 
   return (
     <View style={styles.container}>
+      <Modal visible={showDisclosure} animationType="slide">
+        <View style={styles.disclosureContainer}>
+          <View style={styles.disclosureContent}>
+            <Image
+              source={require('@/assets/images/splash-icon.png')}
+              style={styles.disclosureImage}
+            />
+            <Text style={styles.disclosureTitle}>Location Access Required</Text>
+            <Text style={styles.disclosureText}>
+              Downtown Vibes collects location data to enable calculating the
+              distance to nearby businesses and showing your position on the map
+              even when the app is closed or not in use.
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={styles.disclosureBtn}
+            activeOpacity={0.85}
+            onPress={acceptDisclosure}
+            accessibilityRole="button"
+            accessibilityLabel="I Understand"
+          >
+            <Text style={styles.disclosureBtnText}>I Understand</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
+
       <MapView
         ref={mapRef}
         style={{ flex: 1 }}
@@ -548,25 +598,84 @@ function MapScreen() {
         {/* Map press only dismisses bottom sheet; markers handle their own onPress */}
         {filteredBusinesses.map((biz) => {
           const hasEmoji = !!biz.emoji_icon?.trim();
+          const hasStatic =
+            typeof biz.static_latitude === 'number' &&
+            typeof biz.static_longitude === 'number';
+          const hasTraveling =
+            !!biz.is_traveling_active &&
+            typeof biz.latitude === 'number' &&
+            typeof biz.longitude === 'number';
+
+          const shouldRenderLegacy = !hasStatic && !biz.is_traveling_active;
+
           return (
-            <Marker
-              key={biz.id}
-              coordinate={{
-                latitude: biz.latitude,
-                longitude: biz.longitude,
-              }}
-              image={hasEmoji ? undefined : getPinImage(biz.business_type)}
-              onPress={(e) => {
-                e.stopPropagation();
-                setSelectedBusiness(biz);
-              }}
-            >
-              {hasEmoji && (
-                <View style={styles.emojiBadge}>
-                  <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
-                </View>
+            <React.Fragment key={biz.id}>
+              {/* 1) STATIC PIN */}
+              {hasStatic && (
+                <Marker
+                  key={`${biz.id}-static`}
+                  coordinate={{
+                    latitude: biz.static_latitude as number,
+                    longitude: biz.static_longitude as number,
+                  }}
+                  image={hasEmoji ? undefined : getPinImage(biz.business_type)}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    setSelectedBusiness(biz);
+                  }}
+                >
+                  {hasEmoji && (
+                    <View style={styles.emojiBadge}>
+                      <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
+                    </View>
+                  )}
+                </Marker>
               )}
-            </Marker>
+
+              {/* 2) TRAVELING PIN */}
+              {hasTraveling && (
+                <Marker
+                  key={`${biz.id}-traveling`}
+                  coordinate={{
+                    latitude: biz.latitude,
+                    longitude: biz.longitude,
+                  }}
+                  image={hasEmoji ? undefined : getPinImage(biz.business_type)}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    setSelectedBusiness(biz);
+                  }}
+                >
+                  {hasEmoji && (
+                    <View style={styles.emojiBadge}>
+                      <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
+                    </View>
+                  )}
+                </Marker>
+              )}
+
+              {/* 3) LEGACY PIN */}
+              {shouldRenderLegacy && (
+                <Marker
+                  key={`${biz.id}-legacy`}
+                  coordinate={{
+                    latitude: biz.latitude,
+                    longitude: biz.longitude,
+                  }}
+                  image={hasEmoji ? undefined : getPinImage(biz.business_type)}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    setSelectedBusiness(biz);
+                  }}
+                >
+                  {hasEmoji && (
+                    <View style={styles.emojiBadge}>
+                      <Text style={styles.emojiBadgeText}>{biz.emoji_icon}</Text>
+                    </View>
+                  )}
+                </Marker>
+              )}
+            </React.Fragment>
           );
         })}
       </MapView>
@@ -611,8 +720,8 @@ function MapScreen() {
           style={[
             styles.sidePanel,
             {
-              paddingTop: insets.top + 10,
-              paddingBottom: Math.max(insets.bottom, 16),
+              paddingTop: insets.top + 18,
+              paddingBottom: Math.max(insets.bottom, 40),
               transform: [
                 {
                   translateX: filtersAnim.interpolate({
@@ -624,6 +733,15 @@ function MapScreen() {
             },
           ]}
         >
+          <Image
+            source={require('@/assets/images/watermark.png')}
+            style={[
+              StyleSheet.absoluteFillObject,
+              { opacity: 0.08, resizeMode: 'contain', top: 20 },
+            ]}
+            {...({ pointerEvents: 'none' } as any)}
+          />
+
           <View style={styles.sidePanelHeader}>
             <Text style={styles.modalTitle}>Filters</Text>
             <TouchableOpacity
@@ -679,33 +797,44 @@ function MapScreen() {
 
           {activeSort === 'closest' && userLocation && (
             <View style={styles.closestList}>
-              {closestTop3WithDistance.length === 0 ? (
+              {closestTop5WithDistance.length === 0 ? (
                 <Text style={styles.closestEmptyText}>No nearby pins found.</Text>
               ) : (
-                closestTop3WithDistance.map(({ business, dist }) => (
-                  <View key={business.id} style={styles.closestRow}>
-                    <View style={styles.closestRowText}>
-                      <Text style={styles.closestName} numberOfLines={1}>
-                        {business.business_name}
-                      </Text>
-                      <Text style={styles.closestDistance}>
-                        {formatMiles(dist)}
-                      </Text>
-                    </View>
-                    <TouchableOpacity
-                      style={styles.closestViewBtn}
-                      activeOpacity={0.85}
-                      onPress={() => {
-                        setSelectedBusiness(business);
-                        closeFilters();
-                      }}
-                      accessibilityRole="button"
-                      accessibilityLabel={`View ${business.business_name}`}
+                <ScrollView
+                  style={{ maxHeight: 180 }}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {closestTop5WithDistance.map(({ business, dist }, idx) => (
+                    <View
+                      key={business.id}
+                      style={[
+                        styles.closestRow,
+                        idx === closestTop5WithDistance.length - 1 && styles.closestRowLast,
+                      ]}
                     >
-                      <Text style={styles.closestViewBtnText}>View</Text>
-                    </TouchableOpacity>
-                  </View>
-                ))
+                      <View style={styles.closestRowText}>
+                        <Text style={styles.closestName} numberOfLines={1}>
+                          {business.business_name}
+                        </Text>
+                        <Text style={styles.closestDistance}>
+                          {formatMiles(dist)}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.closestViewBtn}
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          setSelectedBusiness(business);
+                          closeFilters();
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel={`View ${business.business_name}`}
+                      >
+                        <Text style={styles.closestViewBtnText}>View</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </ScrollView>
               )}
             </View>
           )}
@@ -1019,6 +1148,50 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  /* Location disclosure */
+  disclosureContainer: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 24,
+    paddingTop: 24,
+    paddingBottom: 24,
+    justifyContent: 'space-between',
+  },
+  disclosureContent: {
+    alignItems: 'center',
+    paddingTop: 24,
+  },
+  disclosureImage: {
+    width: 180,
+    height: 180,
+    resizeMode: 'contain',
+    marginBottom: 20,
+  },
+  disclosureTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#111827',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  disclosureText: {
+    fontSize: 15,
+    lineHeight: 22,
+    color: '#374151',
+    textAlign: 'center',
+  },
+  disclosureBtn: {
+    backgroundColor: '#6C3AED',
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  disclosureBtnText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
   chipScroll: {
     paddingLeft: 12,
   },
@@ -1134,6 +1307,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#E5E7EB',
   },
+  closestRowLast: {
+    borderBottomWidth: 0,
+  },
   closestRowText: {
     flex: 1,
     paddingRight: 12,
@@ -1244,6 +1420,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 18,
     borderBottomLeftRadius: 18,
     paddingHorizontal: 16,
+    overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: -6, height: 0 },
     shadowOpacity: 0.16,

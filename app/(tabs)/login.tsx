@@ -444,6 +444,7 @@ export default function LoginScreen() {
         .update({
           latitude: loc.coords.latitude,
           longitude: loc.coords.longitude,
+          is_traveling_active: true,
         })
         .eq('id', ownedBusiness.id)
         .select()
@@ -473,6 +474,27 @@ export default function LoginScreen() {
     }
   };
 
+  const clearTravelingPin = async () => {
+    if (!user || !ownedBusiness) return;
+
+    const { error } = await supabase
+      .from('businesses')
+      .update({ is_traveling_active: false })
+      .eq('id', ownedBusiness.id)
+      .select()
+      .single();
+
+    if (error) {
+      Alert.alert('Error', error.message);
+      return;
+    }
+
+    setOwnedBusiness((prev) =>
+      prev ? { ...prev, is_traveling_active: false } : prev
+    );
+    Alert.alert('Success', 'Traveling pin removed');
+  };
+
   // ─── Loading spinner ─────────────────────────────────────────
   if (loading) {
     return (
@@ -497,6 +519,7 @@ export default function LoginScreen() {
 
   // ─── Logged-in: Owner Dashboard ──────────────────────────────
   if (user && ownedBusiness) {
+    const isDualTier = ownedBusiness.account_tier === 'dual';
     return (
       <KeyboardAvoidingView
         style={styles.container}
@@ -511,6 +534,11 @@ export default function LoginScreen() {
             <Text style={styles.heading}>Owner Dashboard</Text>
             <Text style={styles.bizName}>{ownedBusiness.business_name}</Text>
             <Text style={styles.bizType}>{ownedBusiness.business_type}</Text>
+            {isDualTier && (
+              <View style={styles.proBadge}>
+                <Text style={styles.proBadgeText}>Pro Tier: Dual-Pin Active</Text>
+              </View>
+            )}
           </View>
 
           <View style={styles.card}>
@@ -622,22 +650,51 @@ export default function LoginScreen() {
             <Text style={styles.helperText}>Your business website or social page</Text>
           </View>
 
-          <TouchableOpacity
-            style={[
-              styles.locationBtn,
-              isUpdatingLocation && styles.btnDisabled,
-            ]}
-            onPress={handleUpdateLocation}
-            disabled={isUpdatingLocation}
-          >
-            {isUpdatingLocation ? (
-              <ActivityIndicator color="#FFF" />
-            ) : (
-              <Text style={styles.locationBtnText}>
-                📍 Update Pin to My Current Location
+          {isDualTier ? (
+            <>
+              <TouchableOpacity
+                style={[
+                  styles.locationBtn,
+                  isUpdatingLocation && styles.btnDisabled,
+                ]}
+                onPress={handleUpdateLocation}
+                disabled={isUpdatingLocation}
+              >
+                {isUpdatingLocation ? (
+                  <ActivityIndicator color="#FFF" />
+                ) : (
+                  <Text style={styles.locationBtnText}>
+                    📍 Update Pin to My Current Location
+                  </Text>
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.clearTravelingBtn}
+                onPress={clearTravelingPin}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.clearTravelingBtnText}>
+                  🧹 Remove Traveling Pin
+                </Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <View style={styles.upgradeBlock}>
+              <TouchableOpacity
+                style={styles.upgradeBtn}
+                onPress={() => Alert.alert('Opening RevenueCat Paywall...')}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.upgradeBtnText}>
+                  Upgrade to Dual-Pin (Pro)
+                </Text>
+              </TouchableOpacity>
+              <Text style={styles.upgradeHelpText}>
+                Perfect for Food Trucks and Pop-ups. Keep your permanent storefront pin while adding a second live-tracking pin when you travel.
               </Text>
-            )}
-          </TouchableOpacity>
+            </View>
+          )}
 
           <TouchableOpacity
             style={[styles.saveBtn, saving && styles.btnDisabled]}
@@ -798,7 +855,7 @@ export default function LoginScreen() {
                   <TouchableOpacity
                     style={[styles.modalBtn, styles.modalBtnConfirm]}
                     onPress={() => {
-                      if (bypassCode === 'dylan2026') {
+                      if (bypassCode === 'dylandual26') {
                         setDemoBypass(true);
                         setBypassModalVisible(false);
                         Alert.alert('Bypass Active', 'Paywall check disabled for this session.');
@@ -1222,6 +1279,22 @@ const styles = StyleSheet.create({
     textTransform: 'capitalize',
     marginBottom: 12,
   },
+  proBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#DCFCE7',
+    borderColor: '#16A34A',
+    borderWidth: 1,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    marginBottom: 6,
+  },
+  proBadgeText: {
+    color: '#166534',
+    fontWeight: '800',
+    fontSize: 12,
+    letterSpacing: 0.3,
+  },
   card: {
     backgroundColor: '#F9FAFB',
     borderRadius: 12,
@@ -1305,6 +1378,41 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 15,
+  },
+  upgradeBlock: {
+    marginHorizontal: 20,
+    marginTop: 8,
+    marginBottom: 2,
+  },
+  upgradeBtn: {
+    backgroundColor: '#111827',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  upgradeBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  upgradeHelpText: {
+    marginTop: 10,
+    color: '#6B7280',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  clearTravelingBtn: {
+    backgroundColor: '#DC2626',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginHorizontal: 20,
+    marginTop: 10,
+  },
+  clearTravelingBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 14,
   },
   saveBtn: {
     backgroundColor: '#6C3AED',
