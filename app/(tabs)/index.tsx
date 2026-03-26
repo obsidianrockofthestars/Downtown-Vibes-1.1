@@ -30,7 +30,6 @@ import { SearchBar } from '@/components/SearchBar';
 import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const GEOFENCE_RADIUS_METERS = 160;
 const MAX_GEOFENCE_REGIONS = 20;
@@ -259,8 +258,8 @@ function MapScreen() {
   }, []);
 
   const startLocationFlow = useCallback(async () => {
-    const { status: fg } = await Location.requestForegroundPermissionsAsync();
-    if (fg !== 'granted') {
+    const fg = await Location.getForegroundPermissionsAsync();
+    if (fg.status !== 'granted') {
       setPermissionDenied(true);
       return null;
     }
@@ -289,30 +288,26 @@ function MapScreen() {
     );
   }, []);
 
-  const acceptDisclosure = useCallback(async () => {
-    await AsyncStorage.setItem('hasSeenLocationDisclosure', 'true');
+  const acceptAndRequestPermissions = useCallback(async () => {
+    await Location.requestForegroundPermissionsAsync();
+    await Location.requestBackgroundPermissionsAsync();
     setShowDisclosure(false);
-    await startLocationFlow();
   }, [startLocationFlow]);
 
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
-    let cancelled = false;
 
     (async () => {
-      const hasSeen = await AsyncStorage.getItem('hasSeenLocationDisclosure');
-      if (cancelled) return;
-
-      if (hasSeen !== 'true') {
+      const fg = await Location.getForegroundPermissionsAsync();
+      if (fg.status !== 'granted') {
         setShowDisclosure(true);
         return;
       }
-
+      setShowDisclosure(false);
       sub = await startLocationFlow();
     })().catch((err) => console.warn('Location init error:', err));
 
     return () => {
-      cancelled = true;
       sub?.remove();
     };
   }, [startLocationFlow]);
@@ -558,7 +553,7 @@ function MapScreen() {
         <View style={styles.disclosureContainer}>
           <View style={styles.disclosureContent}>
             <Image
-              source={require('@/assets/images/splash-icon.png')}
+              source={require('@/assets/images/DowntownVibes.jpg')}
               style={styles.disclosureImage}
             />
             <Text style={styles.disclosureTitle}>Location Access Required</Text>
@@ -572,7 +567,7 @@ function MapScreen() {
           <TouchableOpacity
             style={styles.disclosureBtn}
             activeOpacity={0.85}
-            onPress={acceptDisclosure}
+            onPress={acceptAndRequestPermissions}
             accessibilityRole="button"
             accessibilityLabel="I Understand"
           >
@@ -733,14 +728,6 @@ function MapScreen() {
             },
           ]}
         >
-          <Image
-            source={require('@/assets/images/watermark.png')}
-            style={[
-              StyleSheet.absoluteFillObject,
-              { opacity: 0.08, resizeMode: 'contain', top: 20 },
-            ]}
-            {...({ pointerEvents: 'none' } as any)}
-          />
 
           <View style={styles.sidePanelHeader}>
             <Text style={styles.modalTitle}>Filters</Text>
@@ -856,6 +843,14 @@ function MapScreen() {
           )}
 
           <View style={styles.categoryGrid}>
+            <Image
+              source={require('@/assets/images/watermark.png')}
+              style={[
+                StyleSheet.absoluteFillObject,
+                { opacity: 0.2, resizeMode: 'cover' },
+              ]}
+              {...({ pointerEvents: 'none' } as any)}
+            />
             {CATEGORIES.map((cat) => {
               const active = activeFilters.includes(cat);
               const colors = CHIP_COLORS[cat];
@@ -916,7 +911,7 @@ function MapScreen() {
           source={require('@/assets/images/watermark.png')}
           style={[
             StyleSheet.absoluteFillObject,
-            { opacity: 0.05, resizeMode: 'cover', zIndex: 0 },
+            { opacity: 0.15, resizeMode: 'cover', zIndex: 0 },
           ]}
           {...({ pointerEvents: 'none' } as any)}
         />
@@ -1162,10 +1157,11 @@ const styles = StyleSheet.create({
     paddingTop: 24,
   },
   disclosureImage: {
-    width: 180,
-    height: 180,
-    resizeMode: 'contain',
-    marginBottom: 20,
+    width: '100%',
+    height: 240,
+    borderRadius: 18,
+    resizeMode: 'cover',
+    marginBottom: 18,
   },
   disclosureTitle: {
     fontSize: 22,
@@ -1355,9 +1351,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   categoryGrid: {
+    backgroundColor: 'white',
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 14,
+    paddingHorizontal: 12,
+    paddingBottom: 34,
+    overflow: 'hidden',
   },
   categoryBox: {
     width: '48%',

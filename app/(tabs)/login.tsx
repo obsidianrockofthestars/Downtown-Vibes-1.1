@@ -25,8 +25,8 @@ import { Business, UserRole } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
 
 const CLAIM_RADIUS_MILES = 0.1;
-const GOOGLE_PLACES_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY ?? '';
-const DEEP_LINK = 'vibeathon://';
+const DEEP_LINK =
+  'https://play.google.com/store/apps/details?id=com.potionsandfamiliars.downtownvibes';
 
 export default function LoginScreen() {
   const { user, role, loading, signIn, signUp, signOut } = useAuth();
@@ -48,7 +48,8 @@ export default function LoginScreen() {
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [newBusinessName, setNewBusinessName] = useState('');
   const [creating, setCreating] = useState(false);
-  const [businessCategory, setBusinessCategory] = useState<'storefront' | 'traveling'>('storefront');
+  const [businessType, setBusinessType] = useState('restaurant');
+  const [pinTier, setPinTier] = useState<'single' | 'dual'>('single');
   const [isEditingDesc, setIsEditingDesc] = useState(false);
   const [editDescText, setEditDescText] = useState('');
   const [demoBypass, setDemoBypass] = useState(false);
@@ -75,6 +76,8 @@ export default function LoginScreen() {
         setEmojiIcon(data.emoji_icon ?? '');
         setMenuLink(data.menu_link ?? '');
         setWebsite(data.website ?? '');
+        setBusinessType(data.business_type ?? 'restaurant');
+        setPinTier((data.account_tier as any) ?? 'single');
         setNeedsOnboarding(false);
       } else {
         setOwnedBusiness(null);
@@ -218,91 +221,30 @@ export default function LoginScreen() {
       const userLat = loc.coords.latitude;
       const userLon = loc.coords.longitude;
 
-      if (businessCategory === 'traveling') {
-        const { error } = await supabase.from('businesses').insert({
-          id: Crypto.randomUUID(),
-          place_id: null,
-          owner_id: user.id,
-          business_name: name,
-          business_type: 'traveling',
-          latitude: userLat,
-          longitude: userLon,
-          emoji_icon: '🚚',
-          is_active: true,
-        });
-
-        if (error) {
-          Alert.alert('Error', error.message);
-        } else {
-          setNewBusinessName('');
-          await fetchBusinessData(user.id);
-          promptSharePin(name);
-        }
-        return;
-      }
-
-      const radius = Math.round(CLAIM_RADIUS_MILES * 1609.34);
-      const url =
-        `https://maps.googleapis.com/maps/api/place/nearbysearch/json` +
-        `?location=${userLat},${userLon}&radius=${radius}` +
-        `&keyword=${encodeURIComponent(name)}&key=${GOOGLE_PLACES_KEY}`;
-
-      const res = await fetch(url);
-      const json = await res.json();
-
-      if (!json.results || json.results.length === 0) {
-        Alert.alert(
-          'Business Not Found',
-          'We could not verify a business with that name at your current location. Make sure you are standing at your business and the name matches.'
-        );
-        setCreating(false);
-        return;
-      }
-
-      const place = json.results[0];
-      const placeLat = place.geometry.location.lat;
-      const placeLng = place.geometry.location.lng;
-
-      const dist = haversineDistance(userLat, userLon, placeLat, placeLng);
-      if (dist > CLAIM_RADIUS_MILES) {
-        Alert.alert(
-          'Too Far Away',
-          'You must be physically located at this business to claim it.'
-        );
-        setCreating(false);
-        return;
-      }
-
-      const displayName = place.name || name;
-      const { error } = await supabase.from('businesses').insert({
+      const insertPayload: any = {
         id: Crypto.randomUUID(),
-        place_id: place.place_id,
         owner_id: user.id,
-        business_name: displayName,
-        business_type: 'store',
-        latitude: placeLat,
-        longitude: placeLng,
-        emoji_icon: '🏪',
+        business_name: name,
+        business_type: businessType,
+        account_tier: pinTier,
+        latitude: userLat,
+        longitude: userLon,
         is_active: true,
-      });
+      };
+
+      if (pinTier === 'dual') {
+        insertPayload.static_latitude = userLat;
+        insertPayload.static_longitude = userLon;
+      }
+
+      const { error } = await supabase.from('businesses').insert(insertPayload);
 
       if (error) {
-        if (
-          error.message.includes('unique') ||
-          error.message.includes('duplicate') ||
-          error.code === '23505'
-        ) {
-          Alert.alert(
-            'Already Claimed',
-            'This business has already been claimed. If you are the true owner, please contact support to dispute.'
-          );
-        } else {
-          Alert.alert('Error', error.message);
-        }
+        Alert.alert('Error', error.message);
       } else {
         setNewBusinessName('');
         await fetchBusinessData(user.id);
-        promptSharePin(displayName);
+        promptSharePin(name);
       }
     } catch {
       Alert.alert('Error', 'Failed to verify your location. Please try again.');
@@ -359,6 +301,7 @@ export default function LoginScreen() {
         emoji_icon: emojiIcon.trim() || null,
         menu_link: cleanMenu,
         website: cleanWebsite,
+        business_type: businessType,
       })
       .eq('id', ownedBusiness.id)
       .select()
@@ -474,25 +417,28 @@ export default function LoginScreen() {
     }
   };
 
-  const clearTravelingPin = async () => {
-    if (!user || !ownedBusiness) return;
+  const handleRemoveTravelingPin = async () => {
+    if (!ownedBusiness) return;
 
-    const { error } = await supabase
-      .from('businesses')
-      .update({ is_traveling_active: false })
-      .eq('id', ownedBusiness.id)
-      .select()
-      .single();
+    setIsUpdatingLocation(true);
+    try {
+      const { error } = await supabase
+        .from('businesses')
+        .update({ is_traveling_active: false })
+        .eq('id', ownedBusiness.id);
 
-    if (error) {
-      Alert.alert('Error', error.message);
-      return;
+      if (error) {
+        Alert.alert('Error', error.message);
+        return;
+      }
+
+      setOwnedBusiness((prev) =>
+        prev ? { ...prev, is_traveling_active: false } : prev
+      );
+      Alert.alert('Traveling pin removed');
+    } finally {
+      setIsUpdatingLocation(false);
     }
-
-    setOwnedBusiness((prev) =>
-      prev ? { ...prev, is_traveling_active: false } : prev
-    );
-    Alert.alert('Success', 'Traveling pin removed');
   };
 
   // ─── Loading spinner ─────────────────────────────────────────
@@ -608,6 +554,36 @@ export default function LoginScreen() {
           </View>
 
           <View style={styles.card}>
+            <Text style={styles.cardLabel}>Business Type</Text>
+            <View style={styles.typeRow}>
+              {(['restaurant', 'bar', 'retail', 'traveling'] as const).map((t) => {
+                const active = businessType === t;
+                const label =
+                  t === 'restaurant'
+                    ? 'Restaurant'
+                    : t === 'bar'
+                      ? 'Bar'
+                      : t === 'retail'
+                        ? 'Retail'
+                        : 'Traveling';
+                return (
+                  <TouchableOpacity
+                    key={t}
+                    style={[styles.typeBtn, active && styles.typeBtnActive]}
+                    onPress={() => setBusinessType(t)}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={[styles.typeBtnText, active && styles.typeBtnTextActive]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={styles.helperText}>This controls your category on the map.</Text>
+          </View>
+
+          <View style={styles.card}>
             <Text style={styles.cardLabel}>Emoji Icon</Text>
             <TextInput
               style={[styles.input, styles.emojiInput]}
@@ -671,7 +647,7 @@ export default function LoginScreen() {
 
               <TouchableOpacity
                 style={styles.clearTravelingBtn}
-                onPress={clearTravelingPin}
+                onPress={handleRemoveTravelingPin}
                 activeOpacity={0.85}
               >
                 <Text style={styles.clearTravelingBtnText}>
@@ -683,7 +659,7 @@ export default function LoginScreen() {
             <View style={styles.upgradeBlock}>
               <TouchableOpacity
                 style={styles.upgradeBtn}
-                onPress={() => Alert.alert('Opening RevenueCat Paywall...')}
+                onPress={() => { setPaywallEntitlement('dual_pin'); setShowPaywall(true); }}
                 activeOpacity={0.85}
               >
                 <Text style={styles.upgradeBtnText}>
@@ -774,46 +750,71 @@ export default function LoginScreen() {
             />
 
             <Text style={[styles.label, { marginTop: 18 }]}>Business Type</Text>
+            <View style={styles.typeRow}>
+              {(['restaurant', 'bar', 'retail', 'traveling'] as const).map((t) => {
+                const active = businessType === t;
+                const label =
+                  t === 'restaurant'
+                    ? 'Restaurant'
+                    : t === 'bar'
+                      ? 'Bar'
+                      : t === 'retail'
+                        ? 'Retail'
+                        : 'Traveling';
+                return (
+                  <TouchableOpacity
+                    key={t}
+                    style={[styles.typeBtn, active && styles.typeBtnActive]}
+                    onPress={() => setBusinessType(t)}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={[styles.typeBtnText, active && styles.typeBtnTextActive]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={[styles.label, { marginTop: 18 }]}>Pin Tier</Text>
             <View style={styles.toggleRow}>
               <TouchableOpacity
                 style={[
                   styles.toggleBtn,
-                  businessCategory === 'storefront' && styles.toggleBtnActive,
+                  pinTier === 'single' && styles.toggleBtnActive,
                 ]}
-                onPress={() => setBusinessCategory('storefront')}
+                onPress={() => setPinTier('single')}
               >
-                <Text style={styles.toggleEmoji}>🏪</Text>
+                <Text style={styles.toggleEmoji}>📍</Text>
                 <Text
                   style={[
                     styles.toggleLabel,
-                    businessCategory === 'storefront' && styles.toggleLabelActive,
+                    pinTier === 'single' && styles.toggleLabelActive,
                   ]}
                 >
-                  Static Storefront
+                  Single Pin
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
                   styles.toggleBtn,
-                  businessCategory === 'traveling' && styles.toggleBtnActive,
+                  pinTier === 'dual' && styles.toggleBtnActive,
                 ]}
-                onPress={() => setBusinessCategory('traveling')}
+                onPress={() => setPinTier('dual')}
               >
-                <Text style={styles.toggleEmoji}>🚚</Text>
+                <Text style={styles.toggleEmoji}>📍📍</Text>
                 <Text
                   style={[
                     styles.toggleLabel,
-                    businessCategory === 'traveling' && styles.toggleLabelActive,
+                    pinTier === 'dual' && styles.toggleLabelActive,
                   ]}
                 >
-                  Traveling Business
+                  Dual Pin
                 </Text>
               </TouchableOpacity>
             </View>
             <Text style={styles.helperText}>
-              {businessCategory === 'storefront'
-                ? 'Verified via Google Places — you must be at the business.'
-                : 'No Places verification — update your pin location anytime.'}
+              Single Pin: A permanent storefront. Dual Pin: Keep your permanent storefront pin while adding a second live-tracking pin when you travel.
             </Text>
 
             <TouchableOpacity
@@ -1204,6 +1205,32 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     marginTop: 4,
+  },
+  typeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 6,
+  },
+  typeBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+  },
+  typeBtnActive: {
+    backgroundColor: '#EDE9FE',
+    borderColor: '#6C3AED',
+  },
+  typeBtnText: {
+    color: '#374151',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  typeBtnTextActive: {
+    color: '#6C3AED',
   },
   toggleBtn: {
     flex: 1,
