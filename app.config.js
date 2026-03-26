@@ -4,12 +4,12 @@ module.exports = {
     slug: 'Vibeathon',
     version: '1.1.1',
     orientation: 'portrait',
-    icon: './assets/images/icon.png',
+    icon: './assets/images/icon.png.png',
     scheme: 'vibeathon',
     userInterfaceStyle: 'automatic',
     splash: {
-      image: './assets/images/splash-icon.png',
-      resizeMode: 'contain',
+      image: './assets/images/DowntownVibes.jpg',
+      resizeMode: 'cover',
       backgroundColor: '#6C3AED',
     },
     ios: {
@@ -27,9 +27,7 @@ module.exports = {
       versionCode: 4,
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
-        foregroundImage: './assets/images/android-icon-foreground.png',
-        backgroundImage: './assets/images/android-icon-background.png',
-        monochromeImage: './assets/images/android-icon-monochrome.png',
+        foregroundImage: './assets/images/icon.png.png',
       },
       config: {
         googleMaps: {
@@ -42,7 +40,7 @@ module.exports = {
     web: {
       bundler: 'metro',
       output: 'static',
-      favicon: './assets/images/favicon.png',
+      favicon: './assets/images/icon.png.png',
     },
     plugins: [
       'expo-router',
@@ -59,7 +57,7 @@ module.exports = {
       [
         'expo-notifications',
         {
-          icon: './assets/images/icon.png',
+          icon: './assets/images/icon.png.png',
           color: '#6C3AED',
         },
       ],
