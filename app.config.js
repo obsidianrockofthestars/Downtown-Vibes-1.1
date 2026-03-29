@@ -2,7 +2,7 @@ module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
-    version: '1.1.1',
+    version: '1.2.1',
     orientation: 'portrait',
     icon: './assets/images/icon.png.png',
     scheme: 'vibeathon',
@@ -24,7 +24,7 @@ module.exports = {
       },
     },
     android: {
-      versionCode: 4,
+      versionCode: 5,
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
         foregroundImage: './assets/images/icon.png.png',
