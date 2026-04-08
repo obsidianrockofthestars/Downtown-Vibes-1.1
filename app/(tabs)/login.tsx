@@ -5,7 +5,6 @@ import {
   KeyboardAvoidingView,
   Modal,
   Platform,
-  Pressable,
   ScrollView,
   Share,
   StyleSheet,
@@ -17,7 +16,7 @@ import {
 import * as Location from 'expo-location';
 import * as Crypto from 'expo-crypto';
 import Purchases from 'react-native-purchases';
-import RevenueCatUI from 'react-native-purchases-ui';
+import RevenueCatUI, { PAYWALL_RESULT } from 'react-native-purchases-ui';
 import { useAuth } from '@/context/AuthContext';
 import { isRunningInExpoGo } from '@/lib/expoGo';
 import { supabase } from '@/lib/supabase';
@@ -52,9 +51,6 @@ export default function LoginScreen() {
   const [pinTier, setPinTier] = useState<'single' | 'dual'>('single');
   const [isEditingDesc, setIsEditingDesc] = useState(false);
   const [editDescText, setEditDescText] = useState('');
-  const [demoBypass, setDemoBypass] = useState(false);
-  const [bypassModalVisible, setBypassModalVisible] = useState(false);
-  const [bypassCode, setBypassCode] = useState('');
   const [showPaywall, setShowPaywall] = useState(false);
   const [paywallEntitlement, setPaywallEntitlement] = useState<'single_pin' | 'dual_pin'>('single_pin');
 
@@ -141,15 +137,15 @@ export default function LoginScreen() {
   };
 
   const handleCreateBusiness = async () => {
-    if (!user) return;
-    const name = newBusinessName.trim();
-    if (!name) {
-      Alert.alert('Missing Name', 'Enter your business name to continue.');
-      return;
-    }
+    try {
+      if (!user) return;
+      const name = newBusinessName.trim();
+      if (!name) {
+        Alert.alert('Missing Name', 'Enter your business name to continue.');
+        return;
+      }
 
-    if (!demoBypass && !isRunningInExpoGo) {
-      try {
+      if (!isRunningInExpoGo) {
         const { count, error: countErr } = await supabase
           .from('businesses')
           .select('id', { count: 'exact', head: true })
@@ -161,7 +157,6 @@ export default function LoginScreen() {
         }
 
         const ownedPinCount = count ?? 0;
-
         if (ownedPinCount >= 2) {
           Alert.alert(
             'Maximum Locations Reached',
@@ -170,51 +165,45 @@ export default function LoginScreen() {
           return;
         }
 
+        const requiredEntitlementIdentifier =
+          ownedPinCount === 0 ? 'single_pin' : 'dual_pin';
+
         const customerInfo = await Purchases.getCustomerInfo();
-        const hasSingle = typeof customerInfo.entitlements.active['single_pin'] !== 'undefined';
-        const hasDual = typeof customerInfo.entitlements.active['dual_pin'] !== 'undefined';
+        const hasSingle =
+          typeof customerInfo.entitlements.active['single_pin'] !== 'undefined';
+        const hasDual =
+          typeof customerInfo.entitlements.active['dual_pin'] !== 'undefined';
 
-        if (ownedPinCount === 0 && !hasSingle && !hasDual) {
-          setPaywallEntitlement('single_pin');
-          setShowPaywall(true);
-          return;
-        }
+        const hasRequiredEntitlement =
+          requiredEntitlementIdentifier === 'single_pin'
+            ? hasSingle || hasDual
+            : hasDual;
 
-        if (ownedPinCount === 1 && !hasDual) {
-          Alert.alert(
-            'Upgrade Required',
-            'You must upgrade to the $15/mo Dual Pin tier to add a second location.',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              {
-                text: 'View Plans',
-                onPress: () => {
-                  setPaywallEntitlement('dual_pin');
-                  setShowPaywall(true);
-                },
-              },
-            ]
-          );
-          return;
+        if (!hasRequiredEntitlement) {
+          const result = await RevenueCatUI.presentPaywallIfNeeded({
+            requiredEntitlementIdentifier,
+          });
+
+          if (
+            result !== PAYWALL_RESULT.PURCHASED &&
+            result !== PAYWALL_RESULT.RESTORED
+          ) {
+            return;
+          }
         }
-      } catch {
-        Alert.alert('Error', 'Could not verify subscription status. Try again.');
+      }
+
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Location Required',
+          'You must enable location access to claim a business.'
+        );
         return;
       }
-    }
 
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert(
-        'Location Required',
-        'You must enable location access to claim a business.'
-      );
-      return;
-    }
+      setCreating(true);
 
-    setCreating(true);
-
-    try {
       const loc = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High,
       });
@@ -246,8 +235,12 @@ export default function LoginScreen() {
         await fetchBusinessData(user.id);
         promptSharePin(name);
       }
-    } catch {
-      Alert.alert('Error', 'Failed to verify your location. Please try again.');
+    } catch (err: any) {
+      console.warn('Create business error:', err);
+      Alert.alert(
+        'Error',
+        err?.message ?? 'Something went wrong. Please try again.'
+      );
     } finally {
       setCreating(false);
     }
@@ -722,17 +715,9 @@ export default function LoginScreen() {
           keyboardShouldPersistTaps="handled"
         >
           <Text style={styles.onboardingEmoji}>📍</Text>
-          <Pressable
-            onLongPress={() => {
-              setBypassCode('');
-              setBypassModalVisible(true);
-            }}
-            delayLongPress={800}
-          >
-            <Text style={styles.onboardingTitle}>
-              Welcome! Let's get your business on the map.
-            </Text>
-          </Pressable>
+          <Text style={styles.onboardingTitle}>
+            Welcome! Let's get your business on the map.
+          </Text>
           <Text style={styles.onboardingSubtext}>
             Enter your business name below and we'll create your pin. You can
             update your location, emoji, and details from the dashboard.
@@ -833,50 +818,6 @@ export default function LoginScreen() {
           <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
             <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>
-
-          <Modal
-            visible={bypassModalVisible}
-            transparent
-            animationType="fade"
-            onRequestClose={() => setBypassModalVisible(false)}
-          >
-            <View style={styles.modalOverlay}>
-              <View style={styles.modalCard}>
-                <Text style={styles.modalTitle}>Admin Override</Text>
-                <TextInput
-                  style={styles.input}
-                  value={bypassCode}
-                  onChangeText={setBypassCode}
-                  placeholder="Enter bypass code"
-                  placeholderTextColor="#9CA3AF"
-                  autoCapitalize="none"
-                  secureTextEntry
-                />
-                <View style={styles.modalBtnRow}>
-                  <TouchableOpacity
-                    style={[styles.modalBtn, styles.modalBtnConfirm]}
-                    onPress={() => {
-                      if (bypassCode === 'dylandual26') {
-                        setDemoBypass(true);
-                        setBypassModalVisible(false);
-                        Alert.alert('Bypass Active', 'Paywall check disabled for this session.');
-                      } else {
-                        Alert.alert('Invalid Code');
-                      }
-                    }}
-                  >
-                    <Text style={styles.modalBtnText}>Confirm</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.modalBtn, styles.modalBtnCancel]}
-                    onPress={() => setBypassModalVisible(false)}
-                  >
-                    <Text style={[styles.modalBtnText, { color: '#6B7280' }]}>Cancel</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
-          </Modal>
 
           <Modal
             visible={showPaywall}
@@ -1483,50 +1424,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
 
-  /* Bypass modal */
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  modalCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 24,
-    width: '100%',
-    maxWidth: 340,
-  },
-  modalTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#1F2937',
-    marginBottom: 14,
-    textAlign: 'center',
-  },
-  modalBtnRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 16,
-  },
-  modalBtn: {
-    flex: 1,
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  modalBtnConfirm: {
-    backgroundColor: '#6C3AED',
-  },
-  modalBtnCancel: {
-    backgroundColor: '#F3F4F6',
-  },
-  modalBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 14,
-  },
   paywallContainer: {
     flex: 1,
     backgroundColor: '#FFFFFF',

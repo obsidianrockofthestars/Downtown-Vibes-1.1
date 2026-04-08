@@ -16,6 +16,7 @@ module.exports = {
       supportsTablet: true,
       bundleIdentifier: 'com.potionsandfamiliars.downtownvibes',
       infoPlist: {
+        ITSAppUsesNonExemptEncryption: false,
         NSLocationWhenInUseUsageDescription:
           'DowntownVibes uses your location to show nearby businesses and flash sale alerts.',
         NSLocationAlwaysAndWhenInUseUsageDescription:
@@ -24,7 +25,7 @@ module.exports = {
       },
     },
     android: {
-      versionCode: 6,
+      versionCode: 7,
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
         foregroundImage: './assets/images/icon.png.png',

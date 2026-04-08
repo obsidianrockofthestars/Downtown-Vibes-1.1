@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -39,6 +40,7 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(true);
   const [favoritesLoading, setFavoritesLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   const fetchVibeChecks = useCallback(async () => {
     if (!user) {
@@ -124,6 +126,43 @@ export default function ProfileScreen() {
     else await fetchFavorites();
     setRefreshing(false);
   };
+
+  const handleDeleteAccount = useCallback(() => {
+    if (!user || deletingAccount) return;
+
+    Alert.alert(
+      'Delete Account?',
+      'Are you sure you want to permanently delete your account? This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setDeletingAccount(true);
+
+              const { error } = await supabase.rpc('delete_account');
+              if (error) {
+                Alert.alert('Error', error.message);
+                return;
+              }
+
+              await signOut();
+            } catch (err: any) {
+              console.warn('Delete account error:', err);
+              Alert.alert(
+                'Error',
+                err?.message ?? 'Could not delete your account. Please try again.'
+              );
+            } finally {
+              setDeletingAccount(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [user, deletingAccount, signOut]);
 
   if (!user || role !== 'customer') {
     return (
@@ -265,6 +304,16 @@ export default function ProfileScreen() {
           )}
         </>
       )}
+
+      <TouchableOpacity
+        style={[styles.deleteBtn, deletingAccount && styles.btnDisabled]}
+        onPress={handleDeleteAccount}
+        disabled={deletingAccount}
+      >
+        <Text style={styles.deleteText}>
+          {deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+        </Text>
+      </TouchableOpacity>
 
       <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
         <Text style={styles.signOutText}>Sign Out</Text>
@@ -482,6 +531,20 @@ const styles = StyleSheet.create({
   },
 
   /* Sign out */
+  deleteBtn: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 24,
+    borderWidth: 1,
+    borderColor: '#DC2626',
+  },
+  deleteText: {
+    color: '#DC2626',
+    fontWeight: '800',
+    fontSize: 15,
+  },
   signOutBtn: {
     backgroundColor: '#FEE2E2',
     borderRadius: 12,
@@ -493,5 +556,8 @@ const styles = StyleSheet.create({
     color: '#DC2626',
     fontWeight: '700',
     fontSize: 15,
+  },
+  btnDisabled: {
+    opacity: 0.6,
   },
 });
