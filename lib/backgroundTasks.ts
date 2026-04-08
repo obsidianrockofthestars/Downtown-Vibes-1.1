@@ -7,6 +7,8 @@ import Constants from 'expo-constants';
 export const GEOFENCE_TASK = 'GEOFENCE_TASK';
 const DISMISSED_KEY = 'geofence_dismissed';
 
+const MAX_DISMISSED = 100;
+
 export async function clearDismissedGeofences() {
   await AsyncStorage.removeItem(DISMISSED_KEY);
 }
@@ -41,14 +43,18 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
     await Notifications.scheduleNotificationAsync({
       content: {
         title: 'Downtown Vibes Alert!',
-        body: 'You are near a spot! Open the app to check for deals.',
-        data: { regionId },
+        body: "You're near a spot! Open the app to check for deals.",
+        data: { businessId: regionId },
       },
       trigger: null,
     });
 
     dismissed.push(regionId);
-    await AsyncStorage.setItem(DISMISSED_KEY, JSON.stringify(dismissed));
+    // Keep only the most recent entries to prevent unbounded growth
+    const trimmed = dismissed.length > MAX_DISMISSED
+      ? dismissed.slice(-MAX_DISMISSED)
+      : dismissed;
+    await AsyncStorage.setItem(DISMISSED_KEY, JSON.stringify(trimmed));
   } catch (err) {
     console.warn('Geofence notification error:', err);
   }

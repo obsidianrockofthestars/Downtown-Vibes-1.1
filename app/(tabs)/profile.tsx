@@ -51,7 +51,7 @@ export default function ProfileScreen() {
 
     const { data: rawChecks } = await supabase
       .from('vibe_checks')
-      .select('*')
+      .select('id,created_at,business_id,user_id,rating,comment')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false });
 

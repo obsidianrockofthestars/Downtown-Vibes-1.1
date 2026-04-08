@@ -10,6 +10,7 @@ import {
   Modal,
   Animated,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -29,6 +30,7 @@ const MAX_GEOFENCE_REGIONS = 20;
 
 const RADAR_RADIUS_MILES = 0.15;
 const BBOX_DEGREES = 0.0025;
+const PROXIMITY_ALERTS_KEY = 'dv_proximity_alerts_enabled';
 
 const CATEGORIES = ['restaurant', 'bar', 'retail', 'traveling'] as const;
 
@@ -81,13 +83,17 @@ function MapScreen() {
   const [activeSort, setActiveSort] = useState<'default' | 'closest'>('default');
   const [nearbySales, setNearbySales] = useState<NearbySale[]>([]);
   const [saleFilterIds, setSaleFilterIds] = useState<string[] | null>(null);
+  const [bizLoading, setBizLoading] = useState(true);
+  const [bizError, setBizError] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [showDisclosure, setShowDisclosure] = useState(false);
+  const [proximityAlertsEnabled, setProximityAlertsEnabled] = useState(false);
   const [selectedBusiness, setSelectedBusiness] = useState<Business | null>(
     null
   );
 
   const shownSalesRef = useRef<Set<string>>(new Set());
+  const locationSubRef = useRef<Location.LocationSubscription | null>(null);
   const mapRef = useRef<MapView | null>(null);
   const lastGeofenceLoc = useRef<{ latitude: number; longitude: number } | null>(
     null
@@ -114,15 +120,48 @@ function MapScreen() {
   }, [filtersAnim]);
 
   useEffect(() => {
-    const fetchBusinesses = async () => {
-      const { data, error } = await supabase
-        .from('businesses')
-        .select('*')
-        .eq('is_active', true);
-      if (error) console.warn('Supabase fetch error:', error.message);
-      if (data) setBusinesses(data);
-    };
+    AsyncStorage.getItem(PROXIMITY_ALERTS_KEY)
+      .then((v) => setProximityAlertsEnabled(v === 'true'))
+      .catch(() => {});
+  }, []);
 
+  const fetchBusinesses = useCallback(async () => {
+    setBizError(false);
+    setBizLoading(true);
+    const { data, error } = await supabase
+      .from('businesses')
+      .select(
+        [
+          'id',
+          'place_id',
+          'google_place_id',
+          'owner_id',
+          'business_name',
+          'flash_sale',
+          'emoji_icon',
+          'is_active',
+          'latitude',
+          'longitude',
+          'static_latitude',
+          'static_longitude',
+          'is_traveling_active',
+          'account_tier',
+          'business_type',
+          'menu_link',
+          'website',
+          'description',
+        ].join(',')
+      )
+      .eq('is_active', true);
+    if (error) {
+      console.warn('Supabase fetch error:', error.message);
+      setBizError(true);
+    }
+    setBusinesses(((data ?? []) as unknown) as Business[]);
+    setBizLoading(false);
+  }, []);
+
+  useEffect(() => {
     fetchBusinesses();
 
     const channel = supabase
@@ -130,33 +169,22 @@ function MapScreen() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'businesses' },
-        () => fetchBusinesses()
+        () => {
+          fetchBusinesses();
+        }
       )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [fetchBusinesses]);
 
   const startLocationFlow = useCallback(async () => {
     const fg = await Location.getForegroundPermissionsAsync();
     if (fg.status !== 'granted') {
       setPermissionDenied(true);
       return null;
-    }
-
-    const { status: bg } = await Location.requestBackgroundPermissionsAsync();
-    if (bg !== 'granted') {
-      console.warn('Background location denied — geofencing disabled');
-    }
-
-    // Expo Go removed Android remote push support (SDK 53+).
-    // Avoid importing `expo-notifications` in that environment.
-    const isExpoGoAndroid = Platform.OS === 'android' && !!Constants.expoGoConfig;
-    if (!isExpoGoAndroid) {
-      const Notifications = await import('expo-notifications');
-      await Notifications.requestPermissionsAsync();
     }
 
     return await Location.watchPositionAsync(
@@ -172,13 +200,57 @@ function MapScreen() {
 
   const acceptAndRequestPermissions = useCallback(async () => {
     await Location.requestForegroundPermissionsAsync();
-    await Location.requestBackgroundPermissionsAsync();
     setShowDisclosure(false);
+    // Actually start tracking now that we have permission
+    startLocationFlow()
+      .then((sub) => {
+        if (sub) locationSubRef.current = sub;
+      })
+      .catch((err) =>
+        console.warn('Location start error after disclosure:', err)
+      );
   }, [startLocationFlow]);
 
-  useEffect(() => {
-    let sub: Location.LocationSubscription | null = null;
+  const toggleProximityAlerts = useCallback(
+    async (next: boolean) => {
+      if (next) {
+        const bg = await Location.requestBackgroundPermissionsAsync();
+        if (bg.status !== 'granted') {
+          Alert.alert(
+            'Background Location Required',
+            'To enable proximity alerts, please allow background location in your device settings.'
+          );
+          return;
+        }
 
+        // Expo Go removed Android remote push support (SDK 53+).
+        const isExpoGoAndroid =
+          Platform.OS === 'android' && !!Constants.expoGoConfig;
+        if (!isExpoGoAndroid) {
+          try {
+            const Notifications = await import('expo-notifications');
+            await Notifications.requestPermissionsAsync();
+          } catch {
+            // best-effort
+          }
+        }
+      } else {
+        try {
+          await Location.stopGeofencingAsync(GEOFENCE_TASK);
+        } catch {
+          // best-effort
+        } finally {
+          lastGeofenceLoc.current = null;
+        }
+      }
+
+      setProximityAlertsEnabled(next);
+      AsyncStorage.setItem(PROXIMITY_ALERTS_KEY, String(next)).catch(() => {});
+    },
+    [lastGeofenceLoc]
+  );
+
+  useEffect(() => {
     (async () => {
       const fg = await Location.getForegroundPermissionsAsync();
       if (fg.status !== 'granted') {
@@ -186,11 +258,13 @@ function MapScreen() {
         return;
       }
       setShowDisclosure(false);
-      sub = await startLocationFlow();
+      const sub = await startLocationFlow();
+      if (sub) locationSubRef.current = sub;
     })().catch((err) => console.warn('Location init error:', err));
 
     return () => {
-      sub?.remove();
+      locationSubRef.current?.remove();
+      locationSubRef.current = null;
     };
   }, [startLocationFlow]);
 
@@ -230,6 +304,7 @@ function MapScreen() {
 
   useEffect(() => {
     if (!userLocation || businesses.length === 0) return;
+    if (!proximityAlertsEnabled) return;
 
     (async () => {
       const bgGranted = await Location.getBackgroundPermissionsAsync();
@@ -260,7 +335,7 @@ function MapScreen() {
         .slice(0, MAX_GEOFENCE_REGIONS);
 
       const regions: Location.LocationRegion[] = sorted.map(({ biz }) => ({
-        identifier: biz.business_name,
+        identifier: biz.id,
         latitude: biz.latitude,
         longitude: biz.longitude,
         radius: GEOFENCE_RADIUS_METERS,
@@ -278,7 +353,7 @@ function MapScreen() {
         console.warn('Geofencing start error:', err);
       }
     })();
-  }, [userLocation, businesses]);
+  }, [userLocation, businesses, proximityAlertsEnabled]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearchQuery(searchQuery), 300);
@@ -536,7 +611,26 @@ function MapScreen() {
         toggleFilter={toggleFilter}
         CATEGORIES={CATEGORIES}
         CHIP_COLORS={CHIP_COLORS}
+        proximityAlertsEnabled={proximityAlertsEnabled}
+        setProximityAlertsEnabled={toggleProximityAlerts}
       />
+
+      {bizLoading && businesses.length === 0 && (
+        <View style={styles.permissionBanner}>
+          <Text style={styles.permissionText}>Loading businesses…</Text>
+        </View>
+      )}
+
+      {bizError && businesses.length === 0 && !bizLoading && (
+        <View style={[styles.permissionBanner, styles.errorBanner]}>
+          <Text style={styles.permissionText}>
+            Couldn't load businesses.
+          </Text>
+          <TouchableOpacity onPress={fetchBusinesses} activeOpacity={0.8}>
+            <Text style={styles.retryText}>Tap to retry</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {permissionDenied && (
         <View style={styles.permissionBanner}>
@@ -672,6 +766,16 @@ const styles = StyleSheet.create({
     color: '#92400E',
     fontWeight: '600',
     fontSize: 13,
+  },
+  errorBanner: {
+    backgroundColor: '#FEE2E2',
+    borderColor: '#F87171',
+  },
+  retryText: {
+    color: '#6C3AED',
+    fontWeight: '700',
+    fontSize: 14,
+    marginTop: 6,
   },
   emojiBadge: {
     backgroundColor: '#FFFFFF',

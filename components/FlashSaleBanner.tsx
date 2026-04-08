@@ -38,19 +38,23 @@ export function FlashSaleBanner({
 
   useEffect(() => {
     if (sales.length > 0) {
-      Animated.spring(translateY, {
-        toValue: 0,
-        useNativeDriver: true,
-        tension: 60,
-        friction: 10,
-      }).start();
+      // Stop any in-progress animation before starting a new one
+      translateY.stopAnimation(() => {
+        Animated.spring(translateY, {
+          toValue: 0,
+          useNativeDriver: true,
+          tension: 60,
+          friction: 10,
+        }).start();
+      });
 
       const timer = setTimeout(dismiss, 8000);
       return () => clearTimeout(timer);
     } else {
+      translateY.stopAnimation();
       translateY.setValue(-120);
     }
-  }, [sales, dismiss]);
+  }, [sales, dismiss, translateY]);
 
   if (sales.length === 0) return null;
 

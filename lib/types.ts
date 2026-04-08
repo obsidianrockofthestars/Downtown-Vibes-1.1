@@ -4,7 +4,7 @@ export interface Business {
   google_place_id?: string | null;
   owner_id: string;
   business_name: string;
-  history_fact: string;
+  history_fact?: string | null;
   flash_sale: string | null;
   emoji_icon: string | null;
   is_active: boolean;
@@ -18,6 +18,8 @@ export interface Business {
   menu_link: string | null;
   website: string | null;
   description: string | null;
+  is_pin_locked?: boolean | null;
+  pin_lock_password?: string | null;
 }
 
 export interface VibeCheck {

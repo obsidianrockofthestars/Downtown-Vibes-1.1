@@ -2,7 +2,7 @@ module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
-    version: '1.2.2',
+    version: '1.3.1',
     orientation: 'portrait',
     icon: './assets/images/icon.png.png',
     scheme: 'vibeathon',
@@ -15,6 +15,7 @@ module.exports = {
     ios: {
       supportsTablet: true,
       bundleIdentifier: 'com.potionsandfamiliars.downtownvibes',
+      buildNumber: '8',
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
         NSLocationWhenInUseUsageDescription:
@@ -25,7 +26,7 @@ module.exports = {
       },
     },
     android: {
-      versionCode: 7,
+      versionCode: 8,
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
         foregroundImage: './assets/images/icon.png.png',
@@ -45,6 +46,7 @@ module.exports = {
     },
     plugins: [
       'expo-router',
+      'expo-secure-store',
       [
         'expo-location',
         {

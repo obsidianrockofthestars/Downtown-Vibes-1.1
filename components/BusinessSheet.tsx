@@ -84,7 +84,7 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
     setVibeLoading(true);
     supabase
       .from('vibe_checks')
-      .select('*')
+      .select('id,created_at,business_id,user_id,rating,comment')
       .eq('business_id', selectedBusiness.id)
       .order('created_at', { ascending: false })
       .limit(20)
@@ -131,6 +131,23 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
     if (!user || !selectedBusiness || vibeRating === 0) return;
 
     setVibeSubmitting(true);
+
+    // Prevent duplicate reviews: check if this user already reviewed this business
+    const { count } = await supabase
+      .from('vibe_checks')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id)
+      .eq('business_id', selectedBusiness.id);
+
+    if ((count ?? 0) > 0) {
+      setVibeSubmitting(false);
+      Alert.alert(
+        'Already Reviewed',
+        "You've already left a Vibe Check for this business."
+      );
+      return;
+    }
+
     const { error } = await supabase.from('vibe_checks').insert({
       business_id: selectedBusiness.id,
       user_id: user.id,
@@ -150,7 +167,7 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
 
     const { data: refreshed } = await supabase
       .from('vibe_checks')
-      .select('*')
+      .select('id,created_at,business_id,user_id,rating,comment')
       .eq('business_id', selectedBusiness.id)
       .order('created_at', { ascending: false })
       .limit(20);
@@ -233,20 +250,12 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
         backgroundStyle={styles.sheetBackground}
         handleIndicatorStyle={styles.sheetHandle}
       >
-        <Image
-          source={require('@/assets/images/watermark.png')}
-          style={{
-            position: 'absolute',
-            bottom: -20,
-            left: -40,
-            width: 250,
-            height: 250,
-            opacity: 0.05,
-            resizeMode: 'contain',
-            zIndex: 0,
-          }}
-          pointerEvents="none"
-        />
+        <View pointerEvents="none" style={{ position: 'absolute', bottom: -20, left: -40, zIndex: 0 }}>
+          <Image
+            source={require('@/assets/images/watermark.png')}
+            style={{ width: 250, height: 250, opacity: 0.05, resizeMode: 'contain' }}
+          />
+        </View>
         <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
           {selectedBusiness && (
             <>
@@ -300,8 +309,15 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
                 activeOpacity={0.8}
                 onPress={() => {
                   const label = encodeURIComponent(selectedBusiness.business_name);
-                  const lat = selectedBusiness.latitude;
-                  const lng = selectedBusiness.longitude;
+                  // Prefer static (storefront) coords for directions; fall back to dynamic location
+                  const lat =
+                    typeof selectedBusiness.static_latitude === 'number'
+                      ? selectedBusiness.static_latitude
+                      : selectedBusiness.latitude;
+                  const lng =
+                    typeof selectedBusiness.static_longitude === 'number'
+                      ? selectedBusiness.static_longitude
+                      : selectedBusiness.longitude;
                   const url =
                     Platform.OS === 'ios'
                       ? `maps:0,0?q=${label}@${lat},${lng}`

@@ -37,6 +37,8 @@ export type FilterPanelProps = {
   toggleFilter: (category: string) => void;
   CATEGORIES: readonly string[];
   CHIP_COLORS: Record<string, { bg: string; text: string }>;
+  proximityAlertsEnabled: boolean;
+  setProximityAlertsEnabled: (next: boolean) => void;
 };
 
 export function FilterPanel({
@@ -58,6 +60,8 @@ export function FilterPanel({
   toggleFilter,
   CATEGORIES,
   CHIP_COLORS,
+  proximityAlertsEnabled,
+  setProximityAlertsEnabled,
 }: FilterPanelProps) {
   return (
     <Modal
@@ -85,20 +89,12 @@ export function FilterPanel({
           },
         ]}
       >
-        <Image
-          source={require('@/assets/images/watermark.png')}
-          style={{
-            position: 'absolute',
-            bottom: 0,
-            right: -40,
-            width: 250,
-            height: 250,
-            opacity: 0.05,
-            resizeMode: 'contain',
-            zIndex: 0,
-          }}
-          pointerEvents="none"
-        />
+        <View pointerEvents="none" style={{ position: 'absolute', bottom: 0, right: -40, zIndex: 0 }}>
+          <Image
+            source={require('@/assets/images/watermark.png')}
+            style={{ width: 250, height: 250, opacity: 0.05, resizeMode: 'contain' }}
+          />
+        </View>
         <View style={styles.sidePanelHeader}>
           <Text style={styles.modalTitle}>Filters</Text>
           <TouchableOpacity
@@ -113,6 +109,32 @@ export function FilterPanel({
         </View>
 
         <SearchBar value={searchQuery} onChange={setSearchQuery} />
+
+        <Text style={styles.modalSectionLabel}>Alerts</Text>
+        <TouchableOpacity
+          onPress={() => setProximityAlertsEnabled(!proximityAlertsEnabled)}
+          activeOpacity={0.85}
+          style={[
+            styles.alertToggleBtn,
+            proximityAlertsEnabled && styles.alertToggleBtnActive,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="Toggle proximity alerts"
+        >
+          <Ionicons
+            name={proximityAlertsEnabled ? 'notifications' : 'notifications-off'}
+            size={18}
+            color={proximityAlertsEnabled ? '#FFFFFF' : '#6B7280'}
+          />
+          <Text
+            style={[
+              styles.alertToggleText,
+              proximityAlertsEnabled && styles.alertToggleTextActive,
+            ]}
+          >
+            Flash sale proximity alerts
+          </Text>
+        </TouchableOpacity>
 
         <Text style={styles.modalSectionLabel}>Sort By</Text>
         <View style={styles.sortBtnRow}>
@@ -218,14 +240,12 @@ export function FilterPanel({
         )}
 
         <View style={styles.categoryGrid}>
-          <Image
-            source={require('@/assets/images/watermark.png')}
-            style={[
-              StyleSheet.absoluteFillObject,
-              { opacity: 0.2, resizeMode: 'cover' },
-            ]}
-            {...({ pointerEvents: 'none' } as any)}
-          />
+          <View pointerEvents="none" style={[StyleSheet.absoluteFillObject]}>
+            <Image
+              source={require('@/assets/images/watermark.png')}
+              style={{ width: '100%', height: '100%', opacity: 0.2, resizeMode: 'cover' }}
+            />
+          </View>
           {CATEGORIES.map((cat) => {
             const active = activeFilters.includes(cat);
             const colors = CHIP_COLORS[cat];
@@ -261,6 +281,30 @@ export function FilterPanel({
 }
 
 const styles = StyleSheet.create({
+  alertToggleBtn: {
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    marginBottom: 8,
+  },
+  alertToggleBtnActive: {
+    backgroundColor: '#6C3AED',
+    borderColor: '#6C3AED',
+  },
+  alertToggleText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#6B7280',
+  },
+  alertToggleTextActive: {
+    color: '#FFFFFF',
+  },
   sortBtnRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

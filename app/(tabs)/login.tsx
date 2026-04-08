@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -16,7 +16,16 @@ import {
 import * as Location from 'expo-location';
 import * as Crypto from 'expo-crypto';
 import Purchases from 'react-native-purchases';
-import RevenueCatUI, { PAYWALL_RESULT } from 'react-native-purchases-ui';
+import RevenueCatUI from 'react-native-purchases-ui';
+
+// Lazy-loaded to avoid crash in Expo Go where the native module isn't available.
+let _rcUI: typeof import('react-native-purchases-ui') | null = null;
+async function loadRevenueCatUI() {
+  if (!_rcUI) {
+    _rcUI = await import('react-native-purchases-ui');
+  }
+  return _rcUI;
+}
 import { useAuth } from '@/context/AuthContext';
 import { isRunningInExpoGo } from '@/lib/expoGo';
 import { supabase } from '@/lib/supabase';
@@ -35,7 +44,10 @@ export default function LoginScreen() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authRole, setAuthRole] = useState<UserRole | null>(null);
 
-  const [ownedBusiness, setOwnedBusiness] = useState<Business | null>(null);
+  const [ownedBusinesses, setOwnedBusinesses] = useState<Business[]>([]);
+  const [selectedBusinessId, setSelectedBusinessId] = useState<string | null>(
+    null
+  );
   const [bizLoading, setBizLoading] = useState(false);
 
   const [flashSale, setFlashSale] = useState('');
@@ -43,7 +55,9 @@ export default function LoginScreen() {
   const [menuLink, setMenuLink] = useState('');
   const [website, setWebsite] = useState('');
   const [saving, setSaving] = useState(false);
-  const [isUpdatingLocation, setIsUpdatingLocation] = useState(false);
+  const [updatingLocationId, setUpdatingLocationId] = useState<string | null>(
+    null
+  );
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [newBusinessName, setNewBusinessName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -53,30 +67,60 @@ export default function LoginScreen() {
   const [editDescText, setEditDescText] = useState('');
   const [showPaywall, setShowPaywall] = useState(false);
   const [paywallEntitlement, setPaywallEntitlement] = useState<'single_pin' | 'dual_pin'>('single_pin');
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [deletingBusinessId, setDeletingBusinessId] = useState<string | null>(
+    null
+  );
+  const [pinLockModalVisible, setPinLockModalVisible] = useState(false);
+  const [pinLockTargetId, setPinLockTargetId] = useState<string | null>(null);
+  const [pinLockMode, setPinLockMode] = useState<'lock' | 'unlock'>('lock');
+  const [pinLockPasswordInput, setPinLockPasswordInput] = useState('');
+  const [pinLockSaving, setPinLockSaving] = useState(false);
 
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
     try {
       const { data, error } = await supabase
         .from('businesses')
-        .select('*')
+        .select(
+          [
+            'id',
+            'owner_id',
+            'business_name',
+            'business_type',
+            'account_tier',
+            'latitude',
+            'longitude',
+            'static_latitude',
+            'static_longitude',
+            'is_traveling_active',
+            'emoji_icon',
+            'flash_sale',
+            'is_pin_locked',
+            'pin_lock_password',
+            'menu_link',
+            'website',
+            'description',
+            'is_active',
+          ].join(',')
+        )
         .eq('owner_id', userId)
-        .limit(1)
-        .maybeSingle();
+        .order('business_name', { ascending: true });
 
       if (error) console.warn('Owner fetch error:', error.message);
 
-      if (data) {
-        setOwnedBusiness(data);
-        setFlashSale(data.flash_sale ?? '');
-        setEmojiIcon(data.emoji_icon ?? '');
-        setMenuLink(data.menu_link ?? '');
-        setWebsite(data.website ?? '');
-        setBusinessType(data.business_type ?? 'restaurant');
-        setPinTier((data.account_tier as any) ?? 'single');
+      const rows = ((data ?? []) as unknown as Business[]) ?? [];
+
+      if (rows.length > 0) {
+        setOwnedBusinesses(rows);
         setNeedsOnboarding(false);
+        setSelectedBusinessId((prev) => {
+          if (prev && rows.some((r) => r.id === prev)) return prev;
+          return rows[0].id;
+        });
       } else {
-        setOwnedBusiness(null);
+        setOwnedBusinesses([]);
+        setSelectedBusinessId(null);
         setNeedsOnboarding(true);
       }
     } catch (err) {
@@ -88,13 +132,34 @@ export default function LoginScreen() {
 
   useEffect(() => {
     if (!user) {
-      setOwnedBusiness(null);
+      setOwnedBusinesses([]);
+      setSelectedBusinessId(null);
       setNeedsOnboarding(false);
       return;
     }
     if (role === 'customer') return;
     fetchBusinessData(user.id);
   }, [user, role]);
+
+  const activeBusiness = useMemo(
+    () =>
+      ownedBusinesses.find((b) => b.id === selectedBusinessId) ??
+      ownedBusinesses[0] ??
+      null,
+    [ownedBusinesses, selectedBusinessId]
+  );
+
+  useEffect(() => {
+    const b = activeBusiness;
+    if (!b) return;
+    setFlashSale(b.flash_sale ?? '');
+    setEmojiIcon(b.emoji_icon ?? '');
+    setMenuLink(b.menu_link ?? '');
+    setWebsite(b.website ?? '');
+    setBusinessType(b.business_type ?? 'restaurant');
+    setPinTier((b.account_tier as 'single' | 'dual') ?? 'single');
+    setIsEditingDesc(false);
+  }, [activeBusiness?.id]);
 
   const handleSignIn = async () => {
     if (!email || !password) {
@@ -180,13 +245,14 @@ export default function LoginScreen() {
             : hasDual;
 
         if (!hasRequiredEntitlement) {
-          const result = await RevenueCatUI.presentPaywallIfNeeded({
+          const rcUI = await loadRevenueCatUI();
+          const result = await rcUI.default.presentPaywallIfNeeded({
             requiredEntitlementIdentifier,
           });
 
           if (
-            result !== PAYWALL_RESULT.PURCHASED &&
-            result !== PAYWALL_RESULT.RESTORED
+            result !== rcUI.PAYWALL_RESULT.PURCHASED &&
+            result !== rcUI.PAYWALL_RESULT.RESTORED
           ) {
             return;
           }
@@ -261,6 +327,87 @@ export default function LoginScreen() {
     ]);
   };
 
+  const handleDeleteAccount = useCallback(() => {
+    if (!user || deletingAccount) return;
+
+    Alert.alert(
+      'Delete Account?',
+      "Are you sure you want to permanently delete your account? This will NOT automatically cancel your active subscriptions. You must cancel your subscription in your device's Apple ID settings. This action cannot be undone.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setDeletingAccount(true);
+
+              const { error } = await supabase.rpc('delete_account');
+              if (error) {
+                Alert.alert('Error', error.message);
+                return;
+              }
+
+              await signOut();
+            } catch (err: any) {
+              console.warn('Delete account error:', err);
+              Alert.alert(
+                'Error',
+                err?.message ?? 'Could not delete your account. Please try again.'
+              );
+            } finally {
+              setDeletingAccount(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [user, deletingAccount, signOut]);
+
+  const handleDeleteBusiness = useCallback(
+    (businessId: string) => {
+      if (!user || deletingBusinessId) return;
+
+      Alert.alert(
+        'Delete Business?',
+        'Are you sure you want to permanently delete this business and its pin? This action cannot be undone.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                setDeletingBusinessId(businessId);
+
+                const { error } = await supabase
+                  .from('businesses')
+                  .delete()
+                  .eq('id', businessId);
+
+                if (error) {
+                  Alert.alert('Error', error.message);
+                  return;
+                }
+
+                await fetchBusinessData(user.id);
+              } catch (err: any) {
+                console.warn('Delete business error:', err);
+                Alert.alert(
+                  'Error',
+                  err?.message ?? 'Could not delete this business. Please try again.'
+                );
+              } finally {
+                setDeletingBusinessId(null);
+              }
+            },
+          },
+        ]
+      );
+    },
+    [user, deletingBusinessId]
+  );
+
   const normalizeUrl = (raw: string): string | null => {
     const trimmed = raw.trim();
     if (!trimmed) return null;
@@ -271,7 +418,7 @@ export default function LoginScreen() {
   };
 
   const handleSaveChanges = async () => {
-    if (!ownedBusiness) return;
+    if (!activeBusiness) return;
 
     const cleanMenu = normalizeUrl(menuLink);
     const cleanWebsite = normalizeUrl(website);
@@ -296,7 +443,7 @@ export default function LoginScreen() {
         website: cleanWebsite,
         business_type: businessType,
       })
-      .eq('id', ownedBusiness.id)
+      .eq('id', activeBusiness.id)
       .select()
       .single();
 
@@ -305,11 +452,14 @@ export default function LoginScreen() {
     if (error) {
       Alert.alert('Error', error.message);
     } else if (data) {
-      setOwnedBusiness(data);
-      setMenuLink(data.menu_link ?? '');
-      setWebsite(data.website ?? '');
+      const row = data as unknown as Business;
+      setOwnedBusinesses((prev) =>
+        prev.map((b) => (b.id === row.id ? row : b))
+      );
+      setMenuLink(row.menu_link ?? '');
+      setWebsite(row.website ?? '');
 
-      const saleText = (data.flash_sale ?? '').trim();
+      const saleText = (row.flash_sale ?? '').trim();
       if (saleText) {
         Alert.alert('Saved', 'Your business has been updated.', [
           { text: 'Done', style: 'cancel' },
@@ -317,7 +467,7 @@ export default function LoginScreen() {
             text: 'Share Flash Sale',
             onPress: () => {
               Share.share({
-                message: `🔥 Flash Sale at ${data.business_name}! "${saleText}" — Open DowntownVibes to see the deal: ${DEEP_LINK}`,
+                message: `🔥 Flash Sale at ${row.business_name}! "${saleText}" — Open DowntownVibes to see the deal: ${DEEP_LINK}`,
                 title: 'DowntownVibes Flash Sale',
               }).catch(() => {});
             },
@@ -330,7 +480,7 @@ export default function LoginScreen() {
   };
 
   const handleUpdateDescription = async () => {
-    if (!ownedBusiness) return;
+    if (!activeBusiness) return;
     if (editDescText.length > 100) {
       Alert.alert('Too Long', 'Description must be 100 characters or less.');
       return;
@@ -341,7 +491,7 @@ export default function LoginScreen() {
     const { data, error } = await supabase
       .from('businesses')
       .update({ description: editDescText.trim() || null })
-      .eq('id', ownedBusiness.id)
+      .eq('id', activeBusiness.id)
       .select()
       .single();
 
@@ -350,14 +500,25 @@ export default function LoginScreen() {
     if (error) {
       Alert.alert('Error', error.message);
     } else if (data) {
-      setOwnedBusiness(data);
+      const row = data as unknown as Business;
+      setOwnedBusinesses((prev) =>
+        prev.map((b) => (b.id === row.id ? row : b))
+      );
       setIsEditingDesc(false);
       Alert.alert('Saved', 'Description updated.');
     }
   };
 
-  const handleUpdateLocation = async () => {
-    if (!ownedBusiness) return;
+  const handleUpdateLocation = async (businessId: string) => {
+    const biz = ownedBusinesses.find((b) => b.id === businessId);
+    if (!biz) return;
+    if (biz.is_pin_locked) {
+      Alert.alert(
+        'Pin Locked',
+        'This pin is locked. Unlock pin location to update it.'
+      );
+      return;
+    }
 
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') {
@@ -368,7 +529,7 @@ export default function LoginScreen() {
       return;
     }
 
-    setIsUpdatingLocation(true);
+    setUpdatingLocationId(businessId);
 
     try {
       const loc = await Location.getCurrentPositionAsync({
@@ -382,21 +543,24 @@ export default function LoginScreen() {
           longitude: loc.coords.longitude,
           is_traveling_active: true,
         })
-        .eq('id', ownedBusiness.id)
+        .eq('id', businessId)
         .select()
         .single();
 
       if (error) {
         Alert.alert('Error', error.message);
       } else if (data) {
-        setOwnedBusiness(data);
+        const row = data as unknown as Business;
+        setOwnedBusinesses((prev) =>
+          prev.map((b) => (b.id === row.id ? row : b))
+        );
         Alert.alert('Success', 'Your pin has been moved to your current location!', [
           { text: 'Done', style: 'cancel' },
           {
             text: 'Share Update',
             onPress: () => {
               Share.share({
-                message: `📍 ${data.business_name} just moved! Find us on DowntownVibes: ${DEEP_LINK}`,
+                message: `📍 ${row.business_name} just moved! Find us on DowntownVibes: ${DEEP_LINK}`,
                 title: 'DowntownVibes Pin Update',
               }).catch(() => {});
             },
@@ -406,31 +570,156 @@ export default function LoginScreen() {
     } catch {
       Alert.alert('Error', 'Failed to acquire GPS position.');
     } finally {
-      setIsUpdatingLocation(false);
+      setUpdatingLocationId(null);
     }
   };
 
-  const handleRemoveTravelingPin = async () => {
-    if (!ownedBusiness) return;
+  const openLockPinModal = useCallback((businessId: string) => {
+    setPinLockTargetId(businessId);
+    setPinLockMode('lock');
+    setPinLockPasswordInput('');
+    setPinLockModalVisible(true);
+  }, []);
 
-    setIsUpdatingLocation(true);
+  const openUnlockPinModal = useCallback((businessId: string) => {
+    setPinLockTargetId(businessId);
+    setPinLockMode('unlock');
+    setPinLockPasswordInput('');
+    setPinLockModalVisible(true);
+  }, []);
+
+  const handleConfirmPinLock = useCallback(async () => {
+    if (!user || !pinLockTargetId || pinLockSaving) return;
+
     try {
-      const { error } = await supabase
+      setPinLockSaving(true);
+
+      if (pinLockMode === 'lock') {
+        const password = pinLockPasswordInput.trim();
+        if (!password) {
+          Alert.alert(
+            'Password required',
+            'Enter a password to lock this pin location.'
+          );
+          return;
+        }
+
+        const { data, error } = await supabase
+          .from('businesses')
+          .update({
+            is_pin_locked: true,
+            pin_lock_password: password,
+          })
+          .eq('id', pinLockTargetId)
+          .select('id,is_pin_locked,pin_lock_password')
+          .single();
+
+        if (error) {
+          Alert.alert('Error', error.message);
+          return;
+        }
+
+        const locked = data as {
+          id: string;
+          is_pin_locked: boolean;
+          pin_lock_password: string | null;
+        };
+        setOwnedBusinesses((prev) =>
+          prev.map((b) =>
+            b.id === locked.id
+              ? {
+                  ...b,
+                  is_pin_locked: locked.is_pin_locked,
+                  pin_lock_password: locked.pin_lock_password,
+                }
+              : b
+          )
+        );
+        setPinLockModalVisible(false);
+        setPinLockTargetId(null);
+        Alert.alert('Pin Locked', 'Pin location is now locked.');
+        return;
+      }
+
+      const { data: latest, error: fetchErr } = await supabase
         .from('businesses')
-        .update({ is_traveling_active: false })
-        .eq('id', ownedBusiness.id);
+        .select('pin_lock_password,is_pin_locked')
+        .eq('id', pinLockTargetId)
+        .maybeSingle();
+
+      if (fetchErr) {
+        Alert.alert('Error', fetchErr.message);
+        return;
+      }
+
+      const expected = ((latest as any)?.pin_lock_password ?? '') as string;
+      const provided = pinLockPasswordInput;
+
+      if ((expected ?? '') !== (provided ?? '')) {
+        Alert.alert('Incorrect Password', 'That password does not match.');
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('businesses')
+        .update({ is_pin_locked: false, pin_lock_password: null })
+        .eq('id', pinLockTargetId)
+        .select('id,is_pin_locked,pin_lock_password')
+        .single();
 
       if (error) {
         Alert.alert('Error', error.message);
         return;
       }
 
-      setOwnedBusiness((prev) =>
-        prev ? { ...prev, is_traveling_active: false } : prev
+      const unlocked = data as {
+        id: string;
+        is_pin_locked: boolean;
+        pin_lock_password: string | null;
+      };
+      setOwnedBusinesses((prev) =>
+        prev.map((b) =>
+          b.id === unlocked.id
+            ? {
+                ...b,
+                is_pin_locked: unlocked.is_pin_locked,
+                pin_lock_password: unlocked.pin_lock_password,
+              }
+            : b
+        )
+      );
+      setPinLockModalVisible(false);
+      setPinLockTargetId(null);
+      Alert.alert('Unlocked', 'Pin location is now unlocked.');
+    } catch (err: any) {
+      console.warn('Pin lock error:', err);
+      Alert.alert('Error', err?.message ?? 'Something went wrong.');
+    } finally {
+      setPinLockSaving(false);
+    }
+  }, [user, pinLockTargetId, pinLockSaving, pinLockMode, pinLockPasswordInput]);
+
+  const handleRemoveTravelingPin = async (businessId: string) => {
+    setUpdatingLocationId(businessId);
+    try {
+      const { error } = await supabase
+        .from('businesses')
+        .update({ is_traveling_active: false })
+        .eq('id', businessId);
+
+      if (error) {
+        Alert.alert('Error', error.message);
+        return;
+      }
+
+      setOwnedBusinesses((prev) =>
+        prev.map((b) =>
+          b.id === businessId ? { ...b, is_traveling_active: false } : b
+        )
       );
       Alert.alert('Traveling pin removed');
     } finally {
-      setIsUpdatingLocation(false);
+      setUpdatingLocationId(null);
     }
   };
 
@@ -457,8 +746,13 @@ export default function LoginScreen() {
   }
 
   // ─── Logged-in: Owner Dashboard ──────────────────────────────
-  if (user && ownedBusiness) {
-    const isDualTier = ownedBusiness.account_tier === 'dual';
+  if (user && activeBusiness) {
+    const pinLockTargetName =
+      ownedBusinesses.find((b) => b.id === pinLockTargetId)?.business_name ?? '';
+    const showDualUpgrade = ownedBusinesses.some(
+      (b) => b.account_tier !== 'dual'
+    );
+
     return (
       <KeyboardAvoidingView
         style={styles.container}
@@ -471,17 +765,143 @@ export default function LoginScreen() {
         >
           <View style={styles.dashboardHeader}>
             <Text style={styles.heading}>Owner Dashboard</Text>
-            <Text style={styles.bizName}>{ownedBusiness.business_name}</Text>
-            <Text style={styles.bizType}>{ownedBusiness.business_type}</Text>
-            {isDualTier && (
-              <View style={styles.proBadge}>
-                <Text style={styles.proBadgeText}>Pro Tier: Dual-Pin Active</Text>
-              </View>
-            )}
+            <Text style={styles.dashboardSubtext}>
+              Each card is one map pin. Tap a card to edit its details below.
+            </Text>
           </View>
 
+          {ownedBusinesses.map((biz) => {
+            const isDual = biz.account_tier === 'dual';
+            const isSelected = biz.id === selectedBusinessId;
+            const locBusy = updatingLocationId === biz.id;
+            return (
+              <View
+                key={biz.id}
+                style={[
+                  styles.bizPinCard,
+                  isSelected && styles.bizPinCardSelected,
+                ]}
+              >
+                <TouchableOpacity
+                  onPress={() => setSelectedBusinessId(biz.id)}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.bizPinCardName}>{biz.business_name}</Text>
+                  <Text style={styles.bizPinCardType}>{biz.business_type}</Text>
+                  {isDual && (
+                    <View style={[styles.proBadge, { alignSelf: 'flex-start', marginTop: 8 }]}>
+                      <Text style={styles.proBadgeText}>Pro: Dual-Pin</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+
+                <View style={styles.bizPinCardActionStack}>
+                  {!biz.is_pin_locked ? (
+                    <TouchableOpacity
+                      style={[
+                        styles.bizCardUpdatePinBtn,
+                        locBusy && styles.btnDisabled,
+                      ]}
+                      onPress={() => handleUpdateLocation(biz.id)}
+                      disabled={!!locBusy}
+                      activeOpacity={0.85}
+                    >
+                      {locBusy ? (
+                        <ActivityIndicator color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.bizCardUpdatePinBtnText}>
+                          📍 Update Pin Location
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  ) : null}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.bizCardLockPinBtn,
+                      !biz.is_pin_locked && styles.bizCardActionBtnSpacing,
+                      (pinLockSaving || locBusy) && styles.btnDisabled,
+                    ]}
+                    onPress={() =>
+                      biz.is_pin_locked
+                        ? openUnlockPinModal(biz.id)
+                        : openLockPinModal(biz.id)
+                    }
+                    disabled={pinLockSaving || !!locBusy}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.bizCardLockPinBtnText}>
+                      {biz.is_pin_locked
+                        ? 'Unlock Pin Location'
+                        : 'Lock Pin Location'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {isDual ? (
+                    <TouchableOpacity
+                      style={[
+                        styles.bizCardRemoveTravelingBtn,
+                        styles.bizCardActionBtnSpacing,
+                        locBusy && styles.btnDisabled,
+                      ]}
+                      onPress={() => handleRemoveTravelingPin(biz.id)}
+                      disabled={!!locBusy}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.bizCardRemoveTravelingBtnText}>
+                        🧹 Remove Traveling Pin
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.bizCardDeleteBtn,
+                      styles.bizCardActionBtnSpacing,
+                      deletingBusinessId === biz.id && styles.btnDisabled,
+                    ]}
+                    onPress={() => handleDeleteBusiness(biz.id)}
+                    disabled={!!deletingBusinessId}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.bizCardDeleteBtnText}>
+                      {deletingBusinessId === biz.id
+                        ? 'Deleting…'
+                        : 'Delete Business'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })}
+
+          {showDualUpgrade ? (
+            <View style={styles.upgradeBlock}>
+              <TouchableOpacity
+                style={styles.upgradeBtn}
+                onPress={() => {
+                  setPaywallEntitlement('dual_pin');
+                  setShowPaywall(true);
+                }}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.upgradeBtnText}>
+                  Upgrade to Dual-Pin (Pro)
+                </Text>
+              </TouchableOpacity>
+              <Text style={styles.upgradeHelpText}>
+                Perfect for Food Trucks and Pop-ups. Keep your permanent
+                storefront pin while adding a second live-tracking pin when you
+                travel.
+              </Text>
+            </View>
+          ) : null}
+
           <View style={styles.card}>
-            <Text style={styles.cardLabel}>Description</Text>
+            <Text style={styles.editTargetHint}>
+              Editing: {activeBusiness.business_name}
+            </Text>
+            <Text style={[styles.cardLabel, { marginTop: 10 }]}>Description</Text>
             {isEditingDesc ? (
               <>
                 <TextInput
@@ -519,12 +939,12 @@ export default function LoginScreen() {
             ) : (
               <>
                 <Text style={styles.descText}>
-                  {ownedBusiness.description || 'No description yet.'}
+                  {activeBusiness.description || 'No description yet.'}
                 </Text>
                 <TouchableOpacity
                   style={styles.editDescBtn}
                   onPress={() => {
-                    setEditDescText(ownedBusiness.description ?? '');
+                    setEditDescText(activeBusiness.description ?? '');
                     setIsEditingDesc(true);
                   }}
                 >
@@ -619,52 +1039,6 @@ export default function LoginScreen() {
             <Text style={styles.helperText}>Your business website or social page</Text>
           </View>
 
-          {isDualTier ? (
-            <>
-              <TouchableOpacity
-                style={[
-                  styles.locationBtn,
-                  isUpdatingLocation && styles.btnDisabled,
-                ]}
-                onPress={handleUpdateLocation}
-                disabled={isUpdatingLocation}
-              >
-                {isUpdatingLocation ? (
-                  <ActivityIndicator color="#FFF" />
-                ) : (
-                  <Text style={styles.locationBtnText}>
-                    📍 Update Pin to My Current Location
-                  </Text>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.clearTravelingBtn}
-                onPress={handleRemoveTravelingPin}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.clearTravelingBtnText}>
-                  🧹 Remove Traveling Pin
-                </Text>
-              </TouchableOpacity>
-            </>
-          ) : (
-            <View style={styles.upgradeBlock}>
-              <TouchableOpacity
-                style={styles.upgradeBtn}
-                onPress={() => { setPaywallEntitlement('dual_pin'); setShowPaywall(true); }}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.upgradeBtnText}>
-                  Upgrade to Dual-Pin (Pro)
-                </Text>
-              </TouchableOpacity>
-              <Text style={styles.upgradeHelpText}>
-                Perfect for Food Trucks and Pop-ups. Keep your permanent storefront pin while adding a second live-tracking pin when you travel.
-              </Text>
-            </View>
-          )}
-
           <TouchableOpacity
             style={[styles.saveBtn, saving && styles.btnDisabled]}
             onPress={handleSaveChanges}
@@ -687,17 +1061,141 @@ export default function LoginScreen() {
                 );
                 return;
               }
-              RevenueCatUI.presentCustomerCenter().catch(() =>
-                Alert.alert('Error', 'Could not open subscription management.')
-              );
+              loadRevenueCatUI()
+                .then((rcUI) => rcUI.default.presentCustomerCenter())
+                .catch(() =>
+                  Alert.alert('Error', 'Could not open subscription management.')
+                );
             }}
           >
             <Text style={styles.manageSubBtnText}>Manage Subscription</Text>
           </TouchableOpacity>
 
+          <TouchableOpacity
+            style={[styles.deleteBtn, deletingAccount && styles.btnDisabled]}
+            onPress={handleDeleteAccount}
+            disabled={deletingAccount}
+          >
+            <Text style={styles.deleteText}>
+              {deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+            </Text>
+          </TouchableOpacity>
+
           <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
             <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>
+
+          {/* Paywall modal (Owner Dashboard) */}
+          <Modal
+            visible={showPaywall}
+            animationType="slide"
+            presentationStyle="pageSheet"
+            onRequestClose={() => setShowPaywall(false)}
+          >
+            <View style={styles.paywallContainer}>
+              {isRunningInExpoGo ? (
+                <View style={styles.paywallContainer}>
+                  <Text style={styles.paywallExpoGoTitle}>Paywall (Expo Go)</Text>
+                  <Text style={styles.paywallExpoGoText}>
+                    RevenueCat paywall is disabled in Expo Go. Use a native
+                    TestFlight build to test purchases.
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.paywallCloseBtn}
+                    onPress={() => setShowPaywall(false)}
+                  >
+                    <Text style={styles.paywallCloseBtnText}>Close</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <>
+                  <RevenueCatUI.Paywall
+                    options={{ offeringIdentifier: 'default' } as any}
+                    onPurchaseCompleted={() => setShowPaywall(false)}
+                    onRestoreCompleted={() => setShowPaywall(false)}
+                    onDismiss={() => setShowPaywall(false)}
+                  />
+                  <TouchableOpacity
+                    style={styles.paywallCloseBtn}
+                    onPress={() => setShowPaywall(false)}
+                  >
+                    <Text style={styles.paywallCloseBtnText}>Close</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </Modal>
+
+          <Modal
+            visible={pinLockModalVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={() => {
+              if (!pinLockSaving) {
+                setPinLockModalVisible(false);
+                setPinLockTargetId(null);
+              }
+            }}
+          >
+            <View style={styles.pinLockBackdrop}>
+              <View style={styles.pinLockCard}>
+                <Text style={styles.pinLockTitle}>
+                  {pinLockMode === 'lock'
+                    ? 'Lock Pin Location'
+                    : 'Unlock Pin Location'}
+                  {pinLockTargetName ? ` — ${pinLockTargetName}` : ''}
+                </Text>
+                <Text style={styles.pinLockSubtext}>
+                  {pinLockMode === 'lock'
+                    ? 'Choose a password. While locked, Update Pin Location is hidden until you unlock.'
+                    : 'Enter your pin lock password to allow moving this pin again.'}
+                </Text>
+                <TextInput
+                  style={styles.input}
+                  value={pinLockPasswordInput}
+                  onChangeText={setPinLockPasswordInput}
+                  placeholder={
+                    pinLockMode === 'lock'
+                      ? 'Choose a password'
+                      : 'Password'
+                  }
+                  placeholderTextColor="#9CA3AF"
+                  secureTextEntry
+                  autoCapitalize="none"
+                />
+
+                <View style={styles.pinLockBtnRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.pinLockPrimaryBtn,
+                      pinLockSaving && styles.btnDisabled,
+                    ]}
+                    onPress={handleConfirmPinLock}
+                    disabled={pinLockSaving}
+                  >
+                    {pinLockSaving ? (
+                      <ActivityIndicator color="#FFF" size="small" />
+                    ) : (
+                      <Text style={styles.pinLockPrimaryText}>
+                        {pinLockMode === 'lock' ? 'Lock Pin' : 'Unlock Pin'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.pinLockCancelBtn}
+                    onPress={() => {
+                      setPinLockModalVisible(false);
+                      setPinLockTargetId(null);
+                    }}
+                    disabled={pinLockSaving}
+                  >
+                    <Text style={styles.pinLockCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
         </ScrollView>
       </KeyboardAvoidingView>
     );
@@ -815,6 +1313,16 @@ export default function LoginScreen() {
             </TouchableOpacity>
           </View>
 
+          <TouchableOpacity
+            style={[styles.deleteBtn, deletingAccount && styles.btnDisabled]}
+            onPress={handleDeleteAccount}
+            disabled={deletingAccount}
+          >
+            <Text style={styles.deleteText}>
+              {deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+            </Text>
+          </TouchableOpacity>
+
           <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
             <Text style={styles.signOutText}>Sign Out</Text>
           </TouchableOpacity>
@@ -830,7 +1338,8 @@ export default function LoginScreen() {
                 <View style={styles.paywallContainer}>
                   <Text style={styles.paywallExpoGoTitle}>Paywall (Expo Go)</Text>
                   <Text style={styles.paywallExpoGoText}>
-                    RevenueCat paywall is disabled in Expo Go. Use a dev build to test purchases.
+                    RevenueCat paywall is disabled in Expo Go. Use a native
+                    TestFlight build to test purchases.
                   </Text>
                   <TouchableOpacity
                     style={styles.paywallCloseBtn}
@@ -842,7 +1351,7 @@ export default function LoginScreen() {
               ) : (
                 <>
                   <RevenueCatUI.Paywall
-                    options={{} as any}
+                    options={{ offeringIdentifier: 'default' } as any}
                     onPurchaseCompleted={() => setShowPaywall(false)}
                     onRestoreCompleted={() => setShowPaywall(false)}
                     onDismiss={() => setShowPaywall(false)}
@@ -1263,6 +1772,111 @@ const styles = StyleSheet.create({
     fontSize: 12,
     letterSpacing: 0.3,
   },
+  dashboardSubtext: {
+    fontSize: 14,
+    color: '#6B7280',
+    lineHeight: 20,
+    marginTop: 4,
+  },
+  bizPinCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 16,
+    marginHorizontal: 20,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  bizPinCardSelected: {
+    borderColor: '#6C3AED',
+    borderWidth: 2,
+    backgroundColor: '#FAF5FF',
+  },
+  bizPinCardName: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1F2937',
+  },
+  bizPinCardType: {
+    fontSize: 14,
+    color: '#6B7280',
+    textTransform: 'capitalize',
+    marginTop: 4,
+  },
+  bizPinCardActionStack: {
+    marginTop: 18,
+    width: '100%',
+    alignSelf: 'stretch',
+  },
+  bizCardActionBtnSpacing: {
+    marginTop: 12,
+  },
+  bizCardUpdatePinBtn: {
+    width: '100%',
+    backgroundColor: '#6C3AED',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  bizCardUpdatePinBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  bizCardLockPinBtn: {
+    width: '100%',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+  },
+  bizCardLockPinBtnText: {
+    color: '#374151',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  bizCardRemoveTravelingBtn: {
+    width: '100%',
+    backgroundColor: '#DC2626',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  bizCardRemoveTravelingBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  bizCardDeleteBtn: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: '#DC2626',
+  },
+  bizCardDeleteBtnText: {
+    color: '#DC2626',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  editTargetHint: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6C3AED',
+    marginBottom: 4,
+  },
   card: {
     backgroundColor: '#F9FAFB',
     borderRadius: 12,
@@ -1334,18 +1948,62 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 14,
   },
-  locationBtn: {
-    backgroundColor: '#059669',
-    borderRadius: 12,
-    paddingVertical: 16,
+  pinLockBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
     alignItems: 'center',
-    marginHorizontal: 20,
-    marginTop: 8,
+    padding: 24,
   },
-  locationBtnText: {
+  pinLockCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 380,
+  },
+  pinLockTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#111827',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  pinLockSubtext: {
+    fontSize: 13,
+    color: '#6B7280',
+    textAlign: 'center',
+    marginBottom: 14,
+    lineHeight: 18,
+  },
+  pinLockBtnRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+  },
+  pinLockPrimaryBtn: {
+    flex: 1,
+    backgroundColor: '#6C3AED',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  pinLockPrimaryText: {
     color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 15,
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  pinLockCancelBtn: {
+    flex: 1,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  pinLockCancelText: {
+    color: '#6B7280',
+    fontWeight: '800',
+    fontSize: 14,
   },
   upgradeBlock: {
     marginHorizontal: 20,
@@ -1385,15 +2043,17 @@ const styles = StyleSheet.create({
   saveBtn: {
     backgroundColor: '#6C3AED',
     borderRadius: 12,
-    paddingVertical: 16,
+    paddingVertical: 14,
     alignItems: 'center',
     marginHorizontal: 20,
     marginTop: 8,
+    minHeight: 48,
+    justifyContent: 'center',
   },
   saveBtnText: {
     color: '#FFFFFF',
     fontWeight: '700',
-    fontSize: 16,
+    fontSize: 15,
   },
   manageSubBtn: {
     backgroundColor: '#F3F4F6',
@@ -1408,6 +2068,21 @@ const styles = StyleSheet.create({
   manageSubBtnText: {
     color: '#374151',
     fontWeight: '700',
+    fontSize: 15,
+  },
+  deleteBtn: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginHorizontal: 20,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#DC2626',
+  },
+  deleteText: {
+    color: '#DC2626',
+    fontWeight: '800',
     fontSize: 15,
   },
   signOutBtn: {

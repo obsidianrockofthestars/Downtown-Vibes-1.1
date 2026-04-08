@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 
 const SUPABASE_URL_RAW = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
 const SUPABASE_ANON_KEY_RAW = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '';
@@ -28,6 +29,22 @@ const noopStorage = {
   removeItem: async (_key: string) => {},
 };
 
+const secureStoreStorage = {
+  getItem: async (key: string) => {
+    try {
+      return await SecureStore.getItemAsync(key);
+    } catch {
+      return null;
+    }
+  },
+  setItem: async (key: string, value: string) => {
+    await SecureStore.setItemAsync(key, value);
+  },
+  removeItem: async (key: string) => {
+    await SecureStore.deleteItemAsync(key);
+  },
+};
+
 export const supabase = createClient(
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
@@ -35,7 +52,11 @@ export const supabase = createClient(
     auth: {
       // Native apps don't have `window`, so guard only for web/server-side bundling.
       storage:
-        Platform.OS === 'web' && isServerSideNoWindow ? noopStorage : AsyncStorage,
+        Platform.OS === 'web'
+          ? isServerSideNoWindow
+            ? noopStorage
+            : AsyncStorage
+          : secureStoreStorage,
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: false,
