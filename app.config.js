@@ -1,4 +1,4 @@
-﻿module.exports = {
+module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
