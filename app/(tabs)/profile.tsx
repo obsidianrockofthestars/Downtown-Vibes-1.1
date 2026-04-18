@@ -9,8 +9,10 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
+import { OnboardingTutorial, ONBOARDING_SEEN_KEY } from '@/components/OnboardingTutorial';
 import { Business, VibeCheck } from '@/lib/types';
 
 interface VibeCheckWithBiz extends VibeCheck {
@@ -32,7 +34,12 @@ function formatDate(dateString: string): string {
 
 type ProfileTab = 'vibe' | 'favorites';
 
-export default function ProfileScreen() {
+export interface ProfileScreenProps {
+  /** When true, hides Sign Out / Delete Account (used when embedded in owner dashboard modal). */
+  embedded?: boolean;
+}
+
+export default function ProfileScreen({ embedded = false }: ProfileScreenProps) {
   const { user, role, signOut } = useAuth();
   const [tab, setTab] = useState<ProfileTab>('vibe');
   const [checks, setChecks] = useState<VibeCheckWithBiz[]>([]);
@@ -41,6 +48,7 @@ export default function ProfileScreen() {
   const [favoritesLoading, setFavoritesLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
 
   const fetchVibeChecks = useCallback(async () => {
     if (!user) {
@@ -164,7 +172,7 @@ export default function ProfileScreen() {
     );
   }, [user, deletingAccount, signOut]);
 
-  if (!user || role !== 'customer') {
+  if (!user || (!embedded && role !== 'customer')) {
     return (
       <View style={styles.center}>
         <Text style={styles.emptyEmoji}>🔒</Text>
@@ -305,19 +313,36 @@ export default function ProfileScreen() {
         </>
       )}
 
-      <TouchableOpacity
-        style={[styles.deleteBtn, deletingAccount && styles.btnDisabled]}
-        onPress={handleDeleteAccount}
-        disabled={deletingAccount}
-      >
-        <Text style={styles.deleteText}>
-          {deletingAccount ? 'Deleting Account…' : 'Delete Account'}
-        </Text>
-      </TouchableOpacity>
+      {!embedded && (
+        <>
+          <TouchableOpacity
+            style={styles.tutorialBtn}
+            onPress={() => setShowTutorial(true)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.tutorialBtnText}>View App Tutorial</Text>
+          </TouchableOpacity>
 
-      <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
-        <Text style={styles.signOutText}>Sign Out</Text>
-      </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.deleteBtn, deletingAccount && styles.btnDisabled]}
+            onPress={handleDeleteAccount}
+            disabled={deletingAccount}
+          >
+            <Text style={styles.deleteText}>
+              {deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
+            <Text style={styles.signOutText}>Sign Out</Text>
+          </TouchableOpacity>
+
+          <OnboardingTutorial
+            visible={showTutorial}
+            onFinish={() => setShowTutorial(false)}
+          />
+        </>
+      )}
     </ScrollView>
   );
 }
@@ -543,6 +568,18 @@ const styles = StyleSheet.create({
   deleteText: {
     color: '#DC2626',
     fontWeight: '800',
+    fontSize: 15,
+  },
+  tutorialBtn: {
+    backgroundColor: '#EDE9FE',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 32,
+  },
+  tutorialBtnText: {
+    color: '#6C3AED',
+    fontWeight: '700',
     fontSize: 15,
   },
   signOutBtn: {

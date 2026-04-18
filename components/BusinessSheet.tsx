@@ -96,7 +96,7 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
   }, [selectedBusiness]);
 
   useEffect(() => {
-    if (!selectedBusiness || !user || role !== 'customer') {
+    if (!selectedBusiness || !user) {
       setIsFavorited(false);
       setFavoriteRowId(null);
       return;
@@ -175,10 +175,10 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
   };
 
   const handleToggleFavorite = useCallback(async () => {
-    if (!user || role !== 'customer') {
+    if (!user) {
       Alert.alert(
         'Sign in to favorite',
-        'You need a free account to favorite!',
+        'You need an account to favorite!',
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Go to Account', onPress: () => router.push('/(tabs)/account') },
@@ -384,10 +384,10 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
                   style={styles.vibeCheckBtn}
                   activeOpacity={0.8}
                   onPress={() => {
-                    if (!user || role !== 'customer') {
+                    if (!user) {
                       Alert.alert(
                         'Sign in to leave a Vibe Check',
-                        'You need a free account to leave a Vibe Check!',
+                        'You need an account to leave a Vibe Check!',
                         [
                           { text: 'Cancel', style: 'cancel' },
                           {

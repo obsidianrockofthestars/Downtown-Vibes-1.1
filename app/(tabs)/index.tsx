@@ -24,6 +24,7 @@ import { GEOFENCE_TASK } from '@/lib/backgroundTasks';
 import { FlashSaleBanner, NearbySale } from '@/components/FlashSaleBanner';
 import { BusinessSheet } from '@/components/BusinessSheet';
 import { FilterPanel } from '@/components/FilterPanel';
+import { OnboardingTutorial, ONBOARDING_SEEN_KEY } from '@/components/OnboardingTutorial';
 
 const GEOFENCE_RADIUS_METERS = 160;
 const MAX_GEOFENCE_REGIONS = 20;
@@ -87,6 +88,7 @@ function MapScreen() {
   const [bizError, setBizError] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [showDisclosure, setShowDisclosure] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [proximityAlertsEnabled, setProximityAlertsEnabled] = useState(false);
   const [selectedBusiness, setSelectedBusiness] = useState<Business | null>(
     null
@@ -201,7 +203,14 @@ function MapScreen() {
   const acceptAndRequestPermissions = useCallback(async () => {
     await Location.requestForegroundPermissionsAsync();
     setShowDisclosure(false);
-    // Actually start tracking now that we have permission
+
+    // Check if user has seen the onboarding tutorial yet
+    const seen = await AsyncStorage.getItem(ONBOARDING_SEEN_KEY).catch(() => null);
+    if (seen !== 'true') {
+      setShowOnboarding(true);
+    }
+
+    // Start tracking now that we have permission
     startLocationFlow()
       .then((sub) => {
         if (sub) locationSubRef.current = sub;
@@ -459,12 +468,17 @@ function MapScreen() {
             activeOpacity={0.85}
             onPress={acceptAndRequestPermissions}
             accessibilityRole="button"
-            accessibilityLabel="I Understand"
+            accessibilityLabel="Continue"
           >
-            <Text style={styles.disclosureBtnText}>I Understand</Text>
+            <Text style={styles.disclosureBtnText}>Continue</Text>
           </TouchableOpacity>
         </View>
       </Modal>
+
+      <OnboardingTutorial
+        visible={showOnboarding}
+        onFinish={() => setShowOnboarding(false)}
+      />
 
       <MapView
         ref={mapRef}

@@ -31,6 +31,8 @@ import { isRunningInExpoGo } from '@/lib/expoGo';
 import { supabase } from '@/lib/supabase';
 import { Business, UserRole } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
+import ProfileScreen from './profile';
+import { OnboardingTutorial } from '@/components/OnboardingTutorial';
 
 const CLAIM_RADIUS_MILES = 0.1;
 const DEEP_LINK =
@@ -76,6 +78,8 @@ export default function LoginScreen() {
   const [pinLockMode, setPinLockMode] = useState<'lock' | 'unlock'>('lock');
   const [pinLockPasswordInput, setPinLockPasswordInput] = useState('');
   const [pinLockSaving, setPinLockSaving] = useState(false);
+  const [showOwnerProfile, setShowOwnerProfile] = useState(false);
+  const [showOwnerTutorial, setShowOwnerTutorial] = useState(false);
 
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
@@ -1072,6 +1076,22 @@ export default function LoginScreen() {
           </TouchableOpacity>
 
           <TouchableOpacity
+            style={styles.ownerProfileBtn}
+            onPress={() => setShowOwnerProfile(true)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.ownerProfileBtnText}>My Vibe Checks & Favorites</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.ownerTutorialBtn}
+            onPress={() => setShowOwnerTutorial(true)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.ownerTutorialBtnText}>View App Tutorial</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
             style={[styles.deleteBtn, deletingAccount && styles.btnDisabled]}
             onPress={handleDeleteAccount}
             disabled={deletingAccount}
@@ -1196,6 +1216,32 @@ export default function LoginScreen() {
               </View>
             </View>
           </Modal>
+
+          {/* Owner: Vibe Checks & Favorites modal */}
+          <Modal
+            visible={showOwnerProfile}
+            animationType="slide"
+            presentationStyle="pageSheet"
+            onRequestClose={() => setShowOwnerProfile(false)}
+          >
+            <View style={{ flex: 1, backgroundColor: '#F9FAFB' }}>
+              <View style={styles.ownerModalHeader}>
+                <Text style={styles.ownerModalTitle}>My Vibe Checks & Favorites</Text>
+                <TouchableOpacity
+                  onPress={() => setShowOwnerProfile(false)}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
+                  <Text style={styles.ownerModalClose}>Close</Text>
+                </TouchableOpacity>
+              </View>
+              <ProfileScreen embedded />
+            </View>
+          </Modal>
+
+          <OnboardingTutorial
+            visible={showOwnerTutorial}
+            onFinish={() => setShowOwnerTutorial(false)}
+          />
         </ScrollView>
       </KeyboardAvoidingView>
     );
@@ -1314,6 +1360,22 @@ export default function LoginScreen() {
           </View>
 
           <TouchableOpacity
+            style={styles.ownerProfileBtn}
+            onPress={() => setShowOwnerProfile(true)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.ownerProfileBtnText}>My Vibe Checks & Favorites</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.ownerTutorialBtn}
+            onPress={() => setShowOwnerTutorial(true)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.ownerTutorialBtnText}>View App Tutorial</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
             style={[styles.deleteBtn, deletingAccount && styles.btnDisabled]}
             onPress={handleDeleteAccount}
             disabled={deletingAccount}
@@ -1366,6 +1428,32 @@ export default function LoginScreen() {
               )}
             </View>
           </Modal>
+
+          {/* Owner: Vibe Checks & Favorites modal */}
+          <Modal
+            visible={showOwnerProfile}
+            animationType="slide"
+            presentationStyle="pageSheet"
+            onRequestClose={() => setShowOwnerProfile(false)}
+          >
+            <View style={{ flex: 1, backgroundColor: '#F9FAFB' }}>
+              <View style={styles.ownerModalHeader}>
+                <Text style={styles.ownerModalTitle}>My Vibe Checks & Favorites</Text>
+                <TouchableOpacity
+                  onPress={() => setShowOwnerProfile(false)}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
+                  <Text style={styles.ownerModalClose}>Close</Text>
+                </TouchableOpacity>
+              </View>
+              <ProfileScreen embedded />
+            </View>
+          </Modal>
+
+          <OnboardingTutorial
+            visible={showOwnerTutorial}
+            onFinish={() => setShowOwnerTutorial(false)}
+          />
         </ScrollView>
       </KeyboardAvoidingView>
     );
@@ -2097,6 +2185,56 @@ const styles = StyleSheet.create({
     color: '#DC2626',
     fontWeight: '700',
     fontSize: 15,
+  },
+
+  ownerProfileBtn: {
+    backgroundColor: '#6C3AED',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginHorizontal: 20,
+    marginTop: 16,
+  },
+  ownerProfileBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  ownerTutorialBtn: {
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginHorizontal: 20,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+  },
+  ownerTutorialBtnText: {
+    color: '#6C3AED',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  ownerModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 56,
+    paddingBottom: 12,
+    backgroundColor: '#F9FAFB',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E7EB',
+  },
+  ownerModalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1F2937',
+  },
+  ownerModalClose: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6C3AED',
   },
 
   paywallContainer: {
