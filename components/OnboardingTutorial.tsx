@@ -5,6 +5,7 @@ import {
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -26,9 +27,13 @@ interface SlideData {
   title: string;
   body: string;
   features?: { icon: string; label: string; description: string }[];
-  columns?: {
-    left: { heading: string; icon: string; items: string[] };
-    right: { heading: string; icon: string; items: string[] };
+  // Optional "subscription tiers" explainer, rendered below the features list.
+  // Used on the Business Owners slide so owners understand Single vs Dual.
+  tiersBlock?: {
+    heading: string;
+    subheading?: string;
+    tiers: { label: string; icon: string; description: string }[];
+    footnote?: string;
   };
 }
 
@@ -63,32 +68,96 @@ const SLIDES: SlideData[] = [
     ],
   },
   {
-    id: 'roles',
-    title: 'Two Ways to Use the App',
-    body: 'Whether you\'re exploring downtown or running a business, Downtown Vibes has you covered.',
-    columns: {
-      left: {
-        heading: 'Customers',
-        icon: '🧭',
-        items: [
-          'Browse the live business map',
-          'Leave Vibe Checks (reviews)',
-          'Favorite businesses you love',
-          'Get flash sale alerts nearby',
-          'Free to use — always',
-        ],
+    id: 'customers',
+    title: 'For Customers',
+    body: "Free for anyone exploring downtown. Find the spots, chase the deals, share the love.",
+    features: [
+      {
+        icon: '🗺️',
+        label: 'Live business map',
+        description:
+          'See every participating business in real time — including live traveling pins for food trucks and pop-ups.',
       },
-      right: {
-        heading: 'Business Owners',
-        icon: '🏪',
-        items: [
-          'Drop a pin for your business',
-          'Launch flash sales in seconds',
-          'See your Vibe Check ratings',
-          'Favorite & review other spots',
-          'Premium pins via subscription',
-        ],
+      {
+        icon: '⚡',
+        label: 'Flash sale alerts',
+        description:
+          'Get a notification when you walk near a limited-time deal.',
       },
+      {
+        icon: '⭐',
+        label: 'Vibe Checks',
+        description:
+          'Leave quick reviews so the community knows which spots are worth it.',
+      },
+      {
+        icon: '❤️',
+        label: 'Favorites',
+        description: 'Save the businesses you love for easy access later.',
+      },
+      {
+        icon: '🆓',
+        label: 'Free, always',
+        description:
+          'No ads, no subscription, no paywalls — just the app.',
+      },
+    ],
+  },
+  {
+    id: 'owners',
+    title: 'For Business Owners',
+    body: "Put your business on the map in minutes. Pick the pin that fits how you operate.",
+    features: [
+      {
+        icon: '📍',
+        label: 'Drop a pin',
+        description:
+          "Sign up, place your pin on the map, and you're live to every customer in the area.",
+      },
+      {
+        icon: '🚚',
+        label: 'Move it or lock it',
+        description:
+          "Every pin can move. Tap \u201CUpdate Pin to My Current Location\u201D and your pin teleports to your exact GPS in seconds — then share the new spot with followers in the same tap. Running a fixed storefront? Lock your pin in place and forget about it.",
+      },
+      {
+        icon: '⚡',
+        label: 'Launch flash sales',
+        description:
+          'Fire a timed deal in seconds — nearby customers get a push notification.',
+      },
+      {
+        icon: '⭐',
+        label: 'Track your vibe',
+        description:
+          'See your Vibe Check ratings and what customers are saying.',
+      },
+      {
+        icon: '❤️',
+        label: "Be a neighbor too",
+        description:
+          'Favorite and review other spots, same as any customer.',
+      },
+    ],
+    tiersBlock: {
+      heading: 'Two subscription tiers',
+      subheading: 'Pick the one that matches how you run your business.',
+      tiers: [
+        {
+          label: 'Single Pin',
+          icon: '📍',
+          description:
+            'One pin. Lock it to your storefront address, or move it when you move — your call.',
+        },
+        {
+          label: 'Dual Pin',
+          icon: '🚚',
+          description:
+            'Two pins. Great if you have a brick-and-mortar AND a mobile presence — like a bakery that also runs a truck. Lock one, move the other, or move both.',
+        },
+      ],
+      footnote:
+        "That's the only difference — Single is one pin, Dual is two. Both can move, both can lock.",
     },
   },
 ];
@@ -136,12 +205,20 @@ export function OnboardingTutorial({ visible, onFinish }: OnboardingTutorialProp
 
   const renderSlide = useCallback(
     ({ item }: { item: SlideData }) => (
-      <View style={styles.slide}>
+      // Each slide gets its own vertical ScrollView so taller content
+      // (especially the Business Owners slide with features + tiersBlock)
+      // can scroll within the page instead of overflowing the screen.
+      // Horizontal swipe between slides is still handled by the outer FlatList.
+      <ScrollView
+        style={styles.slide}
+        contentContainerStyle={styles.slideContent}
+        showsVerticalScrollIndicator={false}
+      >
         {/* Title & body */}
         <Text style={styles.slideTitle}>{item.title}</Text>
         <Text style={styles.slideBody}>{item.body}</Text>
 
-        {/* Feature list (overview slide) */}
+        {/* Feature list */}
         {item.features && (
           <View style={styles.featureList}>
             {item.features.map((f) => (
@@ -156,38 +233,32 @@ export function OnboardingTutorial({ visible, onFinish }: OnboardingTutorialProp
           </View>
         )}
 
-        {/* Two-column role breakdown (roles slide) */}
-        {item.columns && (
-          <View style={styles.columnsRow}>
-            {/* Left column */}
-            <View style={styles.column}>
-              <Text style={styles.columnIcon}>{item.columns.left.icon}</Text>
-              <Text style={styles.columnHeading}>{item.columns.left.heading}</Text>
-              {item.columns.left.items.map((text, i) => (
-                <View key={i} style={styles.bulletRow}>
-                  <Text style={styles.bulletDot}>•</Text>
-                  <Text style={styles.bulletText}>{text}</Text>
+        {/* Subscription-tier explainer (Business Owners slide) */}
+        {item.tiersBlock && (
+          <View style={styles.tiersBlock}>
+            <Text style={styles.tiersHeading}>{item.tiersBlock.heading}</Text>
+            {item.tiersBlock.subheading ? (
+              <Text style={styles.tiersSubheading}>
+                {item.tiersBlock.subheading}
+              </Text>
+            ) : null}
+            {item.tiersBlock.tiers.map((tier) => (
+              <View key={tier.label} style={styles.tierCard}>
+                <Text style={styles.tierIcon}>{tier.icon}</Text>
+                <View style={styles.tierTextWrap}>
+                  <Text style={styles.tierLabel}>{tier.label}</Text>
+                  <Text style={styles.tierDescription}>{tier.description}</Text>
                 </View>
-              ))}
-            </View>
-
-            {/* Divider */}
-            <View style={styles.columnDivider} />
-
-            {/* Right column */}
-            <View style={styles.column}>
-              <Text style={styles.columnIcon}>{item.columns.right.icon}</Text>
-              <Text style={styles.columnHeading}>{item.columns.right.heading}</Text>
-              {item.columns.right.items.map((text, i) => (
-                <View key={i} style={styles.bulletRow}>
-                  <Text style={styles.bulletDot}>•</Text>
-                  <Text style={styles.bulletText}>{text}</Text>
-                </View>
-              ))}
-            </View>
+              </View>
+            ))}
+            {item.tiersBlock.footnote ? (
+              <Text style={styles.tiersFootnote}>
+                {item.tiersBlock.footnote}
+              </Text>
+            ) : null}
           </View>
         )}
-      </View>
+      </ScrollView>
     ),
     []
   );
@@ -273,13 +344,17 @@ const styles = StyleSheet.create({
     color: '#6B7280',
   },
 
-  /* Slide */
+  /* Slide — outer (ScrollView frame, one page of the horizontal pager) */
   slide: {
     width: SCREEN_WIDTH,
     flex: 1,
+  },
+  /* Slide — inner content container (padding lives here so the ScrollView
+     itself stays full-width and the horizontal pager measures correctly) */
+  slideContent: {
     paddingHorizontal: 28,
     paddingTop: 100,
-    paddingBottom: 140,
+    paddingBottom: 160,
   },
   slideTitle: {
     fontSize: 26,
@@ -332,55 +407,62 @@ const styles = StyleSheet.create({
     color: '#6B7280',
   },
 
-  /* Columns */
-  columnsRow: {
-    flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 3,
-    elevation: 1,
+  /* Tier explainer (Single Pin vs Dual Pin) */
+  tiersBlock: {
+    marginTop: 20,
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    padding: 14,
   },
-  column: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  columnIcon: {
-    fontSize: 32,
-    marginBottom: 6,
-  },
-  columnHeading: {
-    fontSize: 16,
+  tiersHeading: {
+    fontSize: 15,
     fontWeight: '800',
-    color: '#6C3AED',
+    color: '#1F2937',
+  },
+  tiersSubheading: {
+    fontSize: 12.5,
+    color: '#6B7280',
+    marginTop: 2,
     marginBottom: 10,
-    textAlign: 'center',
+    lineHeight: 17,
   },
-  columnDivider: {
-    width: 1,
-    backgroundColor: '#E5E7EB',
-    marginHorizontal: 10,
-  },
-  bulletRow: {
+  tierCard: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    marginBottom: 6,
-    paddingRight: 4,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    padding: 12,
+    marginTop: 8,
   },
-  bulletDot: {
-    fontSize: 13,
-    color: '#6C3AED',
-    marginRight: 6,
+  tierIcon: {
+    fontSize: 22,
+    marginRight: 10,
     marginTop: 1,
   },
-  bulletText: {
+  tierTextWrap: {
+    flex: 1,
+  },
+  tierLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1F2937',
+    marginBottom: 2,
+  },
+  tierDescription: {
     fontSize: 12.5,
     lineHeight: 17,
-    color: '#374151',
-    flex: 1,
+    color: '#4B5563',
+  },
+  tiersFootnote: {
+    fontSize: 12,
+    color: '#6B7280',
+    marginTop: 10,
+    fontStyle: 'italic',
+    lineHeight: 16,
   },
 
   /* Footer */

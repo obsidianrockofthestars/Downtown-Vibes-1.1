@@ -40,6 +40,18 @@ yarn-error.*
 # scratch test files (not part of the test suite)
 test-denylist.*
 
+# session scratch — commit batch files, visibility flip scripts, and other
+# one-off utilities used during a single session. Safe to delete manually.
+flip-visibility.*
+security-fix-commit.*
+security-fix-commit-msg.txt
+*-commit.bat
+*-commit.log
+clear-git-lock.ps1
+
+# Supabase scratch SQL harnesses. Promote into supabase/tests/ if reusable.
+supabase/dual_pin_test_harness.sql
+
 # generated native folders
 /ios
 /android

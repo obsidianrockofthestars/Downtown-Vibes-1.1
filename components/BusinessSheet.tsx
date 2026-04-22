@@ -20,6 +20,7 @@ import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { Business, VibeCheck } from '@/lib/types';
 import { useAuth } from '@/context/AuthContext';
+import { matchBlockedWord } from '@/lib/profanityFilter';
 
 function renderStars(rating: number): string {
   const full = Math.round(rating);
@@ -130,6 +131,21 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
   const handleSubmitVibeCheck = async () => {
     if (!user || !selectedBusiness || vibeRating === 0) return;
 
+    // Profanity / slur filter — mirror the enforce_vibe_check_moderation_trg
+    // trigger on public.vibe_checks.comment. Defense-in-depth + UX: catch
+    // bad comments before the network call so the user gets an instant,
+    // friendly error instead of a Supabase error surface. Generic copy,
+    // no word echo. See lib/profanityFilter.ts for the sync invariant.
+    const trimmedComment = vibeComment.trim();
+    if (trimmedComment && matchBlockedWord(trimmedComment) !== null) {
+      Alert.alert(
+        'Vibe check not allowed',
+        'Your vibe check contains words that are not allowed. Please revise. ' +
+          'If you believe this is an error, contact support@potionsandfamiliars.com.'
+      );
+      return;
+    }
+
     setVibeSubmitting(true);
 
     // Prevent duplicate reviews: check if this user already reviewed this business
@@ -152,7 +168,7 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
       business_id: selectedBusiness.id,
       user_id: user.id,
       rating: vibeRating,
-      comment: vibeComment.trim() || null,
+      comment: trimmedComment || null,
     });
     setVibeSubmitting(false);
 

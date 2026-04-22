@@ -29,14 +29,44 @@
  * user with a hacked client cannot bypass the DB check.
  */
 
-/** Normalize a name for comparison: lowercase, strip punctuation/diacritics,
- *  collapse internal whitespace, trim. Returns an array of word tokens. */
+/** Cyrillic + Greek homoglyph fold. Mirrors the server-side
+ *  `normalize_business_name` fold so client and DB agree on which characters
+ *  collapse to which Latin letters. Keep these two tables in lock-step; if
+ *  you add a pair here, add it server-side in the same migration. */
+const HOMOGLYPH_FROM = 'аеіорсхутмкнвАЕІОРСХУТМКНВαορεικντμΑΟΡΕΙΚΝΤΜΗΒ';
+const HOMOGLYPH_TO   = 'aeiopcxytmknbAEIOPCXYTMKHBaoreikntmAOREIKNTMHB';
+const HOMOGLYPH_MAP: Record<string, string> = {};
+for (let i = 0; i < HOMOGLYPH_FROM.length; i++) {
+  HOMOGLYPH_MAP[HOMOGLYPH_FROM[i]] = HOMOGLYPH_TO[i];
+}
+
+/** Normalize a name for comparison: lowercase, Unicode-fold, strip
+ *  punctuation/diacritics, collapse internal whitespace, trim. Returns an
+ *  array of word tokens.
+ *
+ *  Matches the server-side `normalize_business_name` pipeline:
+ *    NFKC → NFKD → strip combining marks → homoglyph fold → lower →
+ *    strip non-alphanumeric → collapse whitespace → trim.
+ *
+ *  The NFKC pass collapses fullwidth / compatibility forms (ＴACO → TACO)
+ *  before the fold; the NFKD pass separates out combining marks so they
+ *  can be dropped; the homoglyph step catches look-alikes that Unicode
+ *  considers distinct code points (Cyrillic 'е' vs Latin 'e'). */
 export function normalizeChainName(raw: string): string[] {
-  return raw
+  // Compatibility-decompose first to collapse fullwidth and ligature forms,
+  // then canonically decompose so combining marks are separate.
+  let s = raw.normalize('NFKC').normalize('NFKD');
+  // Drop combining marks (accents).
+  s = s.replace(/[\u0300-\u036f]/g, '');
+  // Homoglyph fold — walk the string and translate Cyrillic/Greek look-alikes
+  // to their Latin counterparts. Apply before lowercase so the uppercase
+  // pairs in the table still match.
+  let folded = '';
+  for (const ch of s) {
+    folded += HOMOGLYPH_MAP[ch] ?? ch;
+  }
+  return folded
     .toLowerCase()
-    .normalize('NFKD')
-    // Drop combining marks (accents).
-    .replace(/[\u0300-\u036f]/g, '')
     // Replace any non-alphanumeric character with a space. Apostrophes,
     // hyphens, ampersands, periods all become separators.
     .replace(/[^a-z0-9]+/g, ' ')
@@ -72,6 +102,7 @@ const BLOCKED_CHAINS: ReadonlyArray<string> = [
   'Shake Shack',
   'Panda Express',
   "Domino's",
+  'Dominos',
   'Dominos Pizza',
   'Pizza Hut',
   "Papa John's",
@@ -354,6 +385,7 @@ const CHAIN_QUALIFIERS: ReadonlySet<string> = new Set([
   'restaurant',
   'location',
   'cafe',
+  'coffee',
   'express',
   'supercenter',
   'market',

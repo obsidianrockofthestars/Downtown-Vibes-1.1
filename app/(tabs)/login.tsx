@@ -37,6 +37,13 @@ import ProfileScreen from './profile';
 import { OnboardingTutorial } from '@/components/OnboardingTutorial';
 import { StaticPinPickerModal } from '@/components/StaticPinPickerModal';
 import { matchBlockedChain } from '@/lib/chainDenylist';
+import { matchBlockedWord } from '@/lib/profanityFilter';
+import {
+  checkOwnerGateLock,
+  clearOwnerGateLock,
+  recordOwnerGateFailure,
+  OWNER_GATE_LOCKOUT_STEP_1,
+} from '@/lib/ownerGate';
 
 const CLAIM_RADIUS_MILES = 0.1;
 const DEEP_LINK =
@@ -104,6 +111,7 @@ export default function LoginScreen() {
   // All three paths now funnel through the same modal + re-auth flow.
   type OwnerGateAction =
     | { kind: 'delete_business'; businessId: string }
+    | { kind: 'delete_account' }
     | { kind: 'open_paywall'; entitlement: 'single_pin' | 'dual_pin' }
     | { kind: 'manage_subscription' };
 
@@ -407,15 +415,54 @@ export default function LoginScreen() {
         return;
       }
 
+      // Profanity / slur filter — checked BEFORE the chain denylist so users
+      // who try to register "Fuck My Ass" get the content-policy message, not
+      // the chain-denylist message. Defense-in-depth mirror of the
+      // enforce_content_moderation_trg trigger on businesses.business_name.
+      // See lib/profanityFilter.ts for the full wordlist + sync invariant.
+      if (matchBlockedWord(name) !== null) {
+        // TODO(post-trial): fire log_moderation_hit RPC here once the audit
+        // table ships. Reusing log_chain_denylist_hit would pollute the
+        // chain-denylist reporting — keep the two streams separate.
+        Alert.alert(
+          'Business name not allowed',
+          'Your business name contains words that are not allowed. Please choose a different name. ' +
+            'If you believe this is an error, contact support@potionsandfamiliars.com.'
+        );
+        return;
+      }
+
       // Chain denylist check. National chains are not claimable in v1 because
       // we don't yet have a verification flow. A defense-in-depth DB trigger
       // enforces the same rule server-side; this is the friendly-UX path.
       const matchedChain = matchBlockedChain(name);
       if (matchedChain) {
+        // Fire-and-forget audit log so we can see how often this fires and
+        // catch patterns (trademark squatters, confused local owners, etc.).
+        // The RPC is SECURITY DEFINER and safe for anon + authenticated.
+        // Errors here must never block the UX path — we log and move on.
+        void supabase
+          .rpc('log_chain_denylist_hit', {
+            p_raw_name: name,
+            p_matched_chain: matchedChain,
+          })
+          .then(({ error }) => {
+            if (error) {
+              console.warn('chain_denylist_hits log failed:', error.message);
+            }
+          });
+
+        // Generic copy — do NOT echo the matched chain back to the user.
+        // Echoing it tells an attacker which entry in the list their input
+        // tripped, which makes probing the denylist easier. It also avoids
+        // embarrassing collisions (e.g. "Target Practice Archery" sharing a
+        // prefix with a national retailer).
         Alert.alert(
           'This business is not claimable',
-          `"${matchedChain}" is a national chain and can't be claimed in Downtown Vibes. This app is for independent local businesses. ` +
-            `\n\nIf you're a franchisee or manager, email support@potionsandfamiliars.com and we'll help you get listed under a disambiguated name.`
+          "This appears to be a national chain, which isn't claimable in Downtown Vibes. " +
+            'This app is for independent local businesses.\n\n' +
+            "If you're a franchisee or manager, email support@potionsandfamiliars.com " +
+            "and we'll help you get listed under a disambiguated name."
         );
         return;
       }
@@ -537,42 +584,18 @@ export default function LoginScreen() {
     ]);
   };
 
+  // Tapping "Delete Account" routes through the owner gate, same as Delete
+  // Business / Manage Subscription. The Alert.alert yes/no was not strong
+  // enough — an employee with an unlocked phone could wipe the whole
+  // account with one tap. The gate's modal surfaces the Apple-subscription
+  // caveat as its subtitle copy, and requires password re-auth before the
+  // delete_account RPC fires (see handleConfirmOwnerGate below).
   const handleDeleteAccount = useCallback(() => {
-    if (!user || deletingAccount) return;
-
-    Alert.alert(
-      'Delete Account?',
-      "Are you sure you want to permanently delete your account? This will NOT automatically cancel your active subscriptions. You must cancel your subscription in your device's Apple ID settings. This action cannot be undone.",
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              setDeletingAccount(true);
-
-              const { error } = await supabase.rpc('delete_account');
-              if (error) {
-                Alert.alert('Error', error.message);
-                return;
-              }
-
-              await signOut();
-            } catch (err: any) {
-              console.warn('Delete account error:', err);
-              Alert.alert(
-                'Error',
-                err?.message ?? 'Could not delete your account. Please try again.'
-              );
-            } finally {
-              setDeletingAccount(false);
-            }
-          },
-        },
-      ]
-    );
-  }, [user, deletingAccount, signOut]);
+    if (!user || deletingAccount || ownerGateSaving) return;
+    // Route to the shared owner gate modal.
+    setOwnerGateAction({ kind: 'delete_account' });
+    setOwnerGatePassword('');
+  }, [user, deletingAccount, ownerGateSaving]);
 
   // Open the owner gate modal for a given action. Caller supplies the
   // discriminated action; the confirm handler below dispatches on `kind`
@@ -674,6 +697,15 @@ export default function LoginScreen() {
     try {
       setOwnerGateSaving(true);
 
+      // Rate-limit check BEFORE hitting Supabase. If the user is inside a
+      // lockout window, surface the remaining time and abort — don't burn a
+      // network round-trip or expose that the cooldown is client-only.
+      const lockoutMessage = await checkOwnerGateLock(user.id);
+      if (lockoutMessage) {
+        Alert.alert('Please Wait', lockoutMessage);
+        return;
+      }
+
       // Verify the password by attempting a sign-in with the current email.
       // This refreshes the session but does not log the user out on success.
       const { error: authError } = await supabase.auth.signInWithPassword({
@@ -681,11 +713,53 @@ export default function LoginScreen() {
         password,
       });
       if (authError) {
-        Alert.alert('Incorrect Password', 'That password did not match. Please try again.');
+        const state = await recordOwnerGateFailure(user.id);
+        // Diagnostic: surface counter state so we can confirm SecureStore
+        // persistence is working in the Expo Go trial. Safe to ship — the
+        // lockout bounds are documented in support copy anyway.
+        console.log('[ownerGate] wrong password', {
+          userId: user.id,
+          failures: state.failures,
+          lockedUntil: state.lockedUntil,
+          now: Date.now(),
+          locked: state.lockedUntil > Date.now(),
+        });
+        if (state.lockedUntil > Date.now()) {
+          const secondsLeft = Math.ceil((state.lockedUntil - Date.now()) / 1000);
+          const human =
+            secondsLeft > 60
+              ? `${Math.ceil(secondsLeft / 60)} minute${
+                  Math.ceil(secondsLeft / 60) === 1 ? '' : 's'
+                }`
+              : `${secondsLeft} second${secondsLeft === 1 ? '' : 's'}`;
+          Alert.alert(
+            'Too Many Attempts',
+            `That password did not match and this device is now locked for ${human}.`
+          );
+        } else {
+          // Show how many attempts remain before lockout — both as UX and as
+          // a diagnostic for the trial. Threshold is 3 → 30s lockout.
+          const remaining = Math.max(
+            0,
+            OWNER_GATE_LOCKOUT_STEP_1.threshold - state.failures
+          );
+          const attemptLine =
+            remaining > 0
+              ? `Attempt ${state.failures}/${OWNER_GATE_LOCKOUT_STEP_1.threshold}. ${remaining} more wrong ${
+                  remaining === 1 ? 'attempt' : 'attempts'
+                } will lock this device for 30 seconds.`
+              : `Attempt ${state.failures}. This device will be locked on the next wrong attempt.`;
+          Alert.alert(
+            'Incorrect Password',
+            `That password did not match. ${attemptLine}`
+          );
+        }
         return;
       }
 
-      // Re-auth succeeded — dispatch to the pending action.
+      // Re-auth succeeded — clear any accumulated lockout state before
+      // dispatching to the pending action.
+      await clearOwnerGateLock(user.id);
       const action = ownerGateAction;
 
       if (action.kind === 'delete_business') {
@@ -700,6 +774,18 @@ export default function LoginScreen() {
           return;
         }
         await fetchBusinessData(user.id);
+      } else if (action.kind === 'delete_account') {
+        setDeletingAccount(true);
+        const { error: deleteError } = await supabase.rpc('delete_account');
+        if (deleteError) {
+          Alert.alert('Error', deleteError.message);
+          return;
+        }
+        // Tear down the gate before signOut unmounts this screen.
+        setOwnerGateAction(null);
+        setOwnerGatePassword('');
+        await signOut();
+        return;
       } else if (action.kind === 'open_paywall') {
         setPaywallEntitlement(action.entitlement);
         setShowPaywall(true);
@@ -749,6 +835,19 @@ export default function LoginScreen() {
     }
     if (website.trim() && !cleanWebsite?.startsWith('http')) {
       Alert.alert('Invalid URL', 'Website must be a valid web address.');
+      return;
+    }
+
+    // Flash sale is free-text UGC that appears on the public map, so mirror
+    // the enforce_content_moderation_trg trigger client-side. Generic copy,
+    // no word echo. See lib/profanityFilter.ts header for the sync invariant.
+    const trimmedSale = flashSale.trim();
+    if (trimmedSale && matchBlockedWord(trimmedSale) !== null) {
+      Alert.alert(
+        'Flash sale text not allowed',
+        'Your flash sale text contains words that are not allowed. Please revise. ' +
+          'If you believe this is an error, contact support@potionsandfamiliars.com.'
+      );
       return;
     }
 
@@ -803,6 +902,17 @@ export default function LoginScreen() {
     if (!activeBusiness) return;
     if (editDescText.length > 100) {
       Alert.alert('Too Long', 'Description must be 100 characters or less.');
+      return;
+    }
+
+    // Description is public, free-text UGC — mirror the server trigger.
+    const trimmedDesc = editDescText.trim();
+    if (trimmedDesc && matchBlockedWord(trimmedDesc) !== null) {
+      Alert.alert(
+        'Description not allowed',
+        'Your description contains words that are not allowed. Please revise. ' +
+          'If you believe this is an error, contact support@potionsandfamiliars.com.'
+      );
       return;
     }
 
@@ -878,14 +988,24 @@ export default function LoginScreen() {
         setOwnedBusinesses((prev) =>
           prev.map((b) => (b.id === row.id ? row : b))
         );
+        // Compose a share message that reads well as an iMessage preview OR
+        // as a pasted caption on Instagram / X / Facebook. Multi-line with a
+        // lede, the deep link on its own line for easy tap/copy, and the
+        // active flash sale appended when there is one.
+        const saleText = (row.flash_sale ?? '').trim();
+        const shareMessage =
+          `🚚 ${row.business_name} just parked at a new spot!\n\n` +
+          `📍 Tap to see our live location on DowntownVibes:\n${DEEP_LINK}` +
+          (saleText ? `\n\n🔥 Flash sale right now: ${saleText}` : '');
+
         Alert.alert('Success', 'Your pin has been moved to your current location!', [
           { text: 'Done', style: 'cancel' },
           {
             text: 'Share Update',
             onPress: () => {
               Share.share({
-                message: `📍 ${row.business_name} just moved! Find us on DowntownVibes: ${DEEP_LINK}`,
-                title: 'DowntownVibes Pin Update',
+                message: shareMessage,
+                title: `${row.business_name} — new location`,
               }).catch(() => {});
             },
           },
@@ -1181,7 +1301,8 @@ export default function LoginScreen() {
                           🏠 Brick-and-Mortar Pin
                         </Text>
                         <Text style={styles.pinSectionHelp}>
-                          Your permanent storefront location.
+                          Your main storefront pin. Lock it to keep it put, or
+                          move it anytime.
                         </Text>
 
                         <TouchableOpacity
@@ -1360,9 +1481,9 @@ export default function LoginScreen() {
                 </Text>
               </TouchableOpacity>
               <Text style={styles.upgradeHelpText}>
-                Perfect for Food Trucks and Pop-ups. Keep your permanent
-                storefront pin while adding a second live-tracking pin when you
-                travel.
+                Perfect for Food Trucks and Pop-ups. Get a second pin so you
+                can anchor one at your storefront AND run a live pin that
+                moves with you. Lock one, move the other — or move both.
               </Text>
             </View>
           ) : null}
@@ -1701,6 +1822,13 @@ export default function LoginScreen() {
                     ctaLabel = 'Delete Business';
                     ctaStyle = styles.deleteBizConfirmBtn;
                     ctaTextStyle = styles.deleteBizConfirmText;
+                  } else if (action.kind === 'delete_account') {
+                    title = 'Delete Account';
+                    subtitle =
+                      "Enter your account password to permanently delete your account, all your businesses, and all your vibe checks. This will NOT cancel your active App Store or Play Store subscription — you must do that in your device's subscription settings. This cannot be undone.";
+                    ctaLabel = 'Delete Account';
+                    ctaStyle = styles.deleteBizConfirmBtn;
+                    ctaTextStyle = styles.deleteBizConfirmText;
                   } else if (action.kind === 'open_paywall') {
                     title =
                       action.entitlement === 'dual_pin'
@@ -1913,7 +2041,7 @@ export default function LoginScreen() {
               </TouchableOpacity>
             </View>
             <Text style={styles.helperText}>
-              Single Pin: A permanent storefront. Dual Pin: Keep your permanent storefront pin while adding a second live-tracking pin when you travel.
+              Single Pin: one pin — move it or lock it. Dual Pin: two pins — perfect if you have a fixed location AND a mobile presence. Either tier, every pin can move and every pin can lock.
             </Text>
 
             <TouchableOpacity

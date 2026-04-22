@@ -2,10 +2,12 @@ import React, { useEffect, useState, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -14,6 +16,12 @@ import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { OnboardingTutorial, ONBOARDING_SEEN_KEY } from '@/components/OnboardingTutorial';
 import { Business, VibeCheck } from '@/lib/types';
+import {
+  checkOwnerGateLock,
+  clearOwnerGateLock,
+  recordOwnerGateFailure,
+  OWNER_GATE_LOCKOUT_STEP_1,
+} from '@/lib/ownerGate';
 
 interface VibeCheckWithBiz extends VibeCheck {
   business_name: string;
@@ -49,6 +57,14 @@ export default function ProfileScreen({ embedded = false }: ProfileScreenProps) 
   const [refreshing, setRefreshing] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [showTutorial, setShowTutorial] = useState(false);
+
+  // Delete-Account owner gate. Mirrors the password re-auth + SecureStore
+  // rate limiter used by Delete Business in login.tsx. The lockout counter
+  // is SHARED (same SecureStore key namespace) so a user who burns attempts
+  // on one destructive action can't fish for extra guesses on the other.
+  const [deleteGateVisible, setDeleteGateVisible] = useState(false);
+  const [deleteGatePassword, setDeleteGatePassword] = useState('');
+  const [deleteGateSaving, setDeleteGateSaving] = useState(false);
 
   const fetchVibeChecks = useCallback(async () => {
     if (!user) {
@@ -135,42 +151,122 @@ export default function ProfileScreen({ embedded = false }: ProfileScreenProps) 
     setRefreshing(false);
   };
 
+  // Tapping "Delete Account" opens the owner-gate modal. The Alert.alert
+  // yes/no prompt was not strong enough — an employee with an unlocked phone
+  // could nuke the whole account with one tap. Now the same password re-auth
+  // + rate limiter used for Delete Business also guards Delete Account.
   const handleDeleteAccount = useCallback(() => {
-    if (!user || deletingAccount) return;
+    if (!user || deletingAccount || deleteGateSaving) return;
+    setDeleteGatePassword('');
+    setDeleteGateVisible(true);
+  }, [user, deletingAccount, deleteGateSaving]);
 
-    Alert.alert(
-      'Delete Account?',
-      'Are you sure you want to permanently delete your account? This action cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              setDeletingAccount(true);
+  const closeDeleteGate = useCallback(() => {
+    if (deleteGateSaving) return;
+    setDeleteGateVisible(false);
+    setDeleteGatePassword('');
+  }, [deleteGateSaving]);
 
-              const { error } = await supabase.rpc('delete_account');
-              if (error) {
-                Alert.alert('Error', error.message);
-                return;
-              }
+  // Verifies the current user's account password via signInWithPassword,
+  // respecting the shared owner-gate lockout counter. On success, calls
+  // the delete_account RPC and signs out. Mirrors handleConfirmOwnerGate
+  // in login.tsx — keep these in sync if the rate-limit policy changes.
+  const handleConfirmDeleteAccount = useCallback(async () => {
+    if (!user || deleteGateSaving || deletingAccount) return;
 
-              await signOut();
-            } catch (err: any) {
-              console.warn('Delete account error:', err);
-              Alert.alert(
-                'Error',
-                err?.message ?? 'Could not delete your account. Please try again.'
-              );
-            } finally {
-              setDeletingAccount(false);
-            }
-          },
-        },
-      ]
-    );
-  }, [user, deletingAccount, signOut]);
+    const password = deleteGatePassword;
+    if (!password) {
+      Alert.alert('Password Required', 'Enter your account password to continue.');
+      return;
+    }
+    if (!user.email) {
+      Alert.alert(
+        'Cannot Verify',
+        'No email on this account. Please sign out and back in, then try again.'
+      );
+      return;
+    }
+
+    try {
+      setDeleteGateSaving(true);
+
+      // Rate-limit check BEFORE hitting Supabase — don't burn a network
+      // round-trip or expose that the cooldown is client-side.
+      const lockoutMessage = await checkOwnerGateLock(user.id);
+      if (lockoutMessage) {
+        Alert.alert('Please Wait', lockoutMessage);
+        return;
+      }
+
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password,
+      });
+      if (authError) {
+        const state = await recordOwnerGateFailure(user.id);
+        console.log('[ownerGate] wrong password (delete_account)', {
+          userId: user.id,
+          failures: state.failures,
+          lockedUntil: state.lockedUntil,
+          now: Date.now(),
+          locked: state.lockedUntil > Date.now(),
+        });
+        if (state.lockedUntil > Date.now()) {
+          const secondsLeft = Math.ceil((state.lockedUntil - Date.now()) / 1000);
+          const human =
+            secondsLeft > 60
+              ? `${Math.ceil(secondsLeft / 60)} minute${
+                  Math.ceil(secondsLeft / 60) === 1 ? '' : 's'
+                }`
+              : `${secondsLeft} second${secondsLeft === 1 ? '' : 's'}`;
+          Alert.alert(
+            'Too Many Attempts',
+            `That password did not match and this device is now locked for ${human}.`
+          );
+        } else {
+          const remaining = Math.max(
+            0,
+            OWNER_GATE_LOCKOUT_STEP_1.threshold - state.failures
+          );
+          const attemptLine =
+            remaining > 0
+              ? `Attempt ${state.failures}/${OWNER_GATE_LOCKOUT_STEP_1.threshold}. ${remaining} more wrong ${
+                  remaining === 1 ? 'attempt' : 'attempts'
+                } will lock this device for 30 seconds.`
+              : `Attempt ${state.failures}. This device will be locked on the next wrong attempt.`;
+          Alert.alert(
+            'Incorrect Password',
+            `That password did not match. ${attemptLine}`
+          );
+        }
+        return;
+      }
+
+      // Re-auth succeeded — clear lockout and fire the destructive RPC.
+      await clearOwnerGateLock(user.id);
+
+      setDeletingAccount(true);
+      const { error: deleteError } = await supabase.rpc('delete_account');
+      if (deleteError) {
+        Alert.alert('Error', deleteError.message);
+        return;
+      }
+
+      // Tear down the gate before signOut unmounts this screen.
+      setDeleteGateVisible(false);
+      setDeleteGatePassword('');
+      await signOut();
+    } catch (err: any) {
+      console.warn('Delete account error:', err);
+      Alert.alert(
+        'Error',
+        err?.message ?? 'Could not delete your account. Please try again.'
+      );
+    } finally {
+      setDeleteGateSaving(false);
+      setDeletingAccount(false);
+    }
+  }, [user, deleteGateSaving, deleteGatePassword, deletingAccount, signOut]);
 
   if (!user || (!embedded && role !== 'customer')) {
     return (
@@ -341,6 +437,60 @@ export default function ProfileScreen({ embedded = false }: ProfileScreenProps) 
             visible={showTutorial}
             onFinish={() => setShowTutorial(false)}
           />
+
+          {/* Delete-Account owner gate. Same pattern as Delete Business in
+              login.tsx — password re-auth + shared SecureStore rate limiter. */}
+          <Modal
+            visible={deleteGateVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={closeDeleteGate}
+          >
+            <View style={styles.gateBackdrop}>
+              <View style={styles.gateCard}>
+                <Text style={styles.gateTitle}>Delete Account</Text>
+                <Text style={styles.gateSubtext}>
+                  Enter your account password to permanently delete your
+                  account, all your businesses, and all your vibe checks.
+                  This cannot be undone.
+                </Text>
+                <TextInput
+                  style={styles.gateInput}
+                  value={deleteGatePassword}
+                  onChangeText={setDeleteGatePassword}
+                  placeholder="Account password"
+                  placeholderTextColor="#9CA3AF"
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <View style={styles.gateBtnRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.gateConfirmBtn,
+                      (deleteGateSaving || deletingAccount) && styles.btnDisabled,
+                    ]}
+                    onPress={handleConfirmDeleteAccount}
+                    disabled={deleteGateSaving || deletingAccount}
+                  >
+                    {deleteGateSaving || deletingAccount ? (
+                      <ActivityIndicator color="#FFF" size="small" />
+                    ) : (
+                      <Text style={styles.gateConfirmText}>Delete Account</Text>
+                    )}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.gateCancelBtn}
+                    onPress={closeDeleteGate}
+                    disabled={deleteGateSaving || deletingAccount}
+                  >
+                    <Text style={styles.gateCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
         </>
       )}
     </ScrollView>
@@ -596,5 +746,72 @@ const styles = StyleSheet.create({
   },
   btnDisabled: {
     opacity: 0.6,
+  },
+
+  /* Delete-Account owner gate modal. Mirrors pinLock* styles from login.tsx. */
+  gateBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  gateCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 20,
+  },
+  gateTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1F2937',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  gateSubtext: {
+    fontSize: 14,
+    color: '#4B5563',
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 14,
+  },
+  gateInput: {
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: '#1F2937',
+    backgroundColor: '#F9FAFB',
+    marginBottom: 14,
+  },
+  gateBtnRow: {
+    flexDirection: 'column',
+    gap: 10,
+  },
+  gateConfirmBtn: {
+    backgroundColor: '#DC2626',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  gateConfirmText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  gateCancelBtn: {
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  gateCancelText: {
+    color: '#1F2937',
+    fontWeight: '700',
+    fontSize: 15,
   },
 });
