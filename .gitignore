@@ -37,6 +37,9 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
+# scratch test files (not part of the test suite)
+test-denylist.*
+
 # generated native folders
 /ios
 /android

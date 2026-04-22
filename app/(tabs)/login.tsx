@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   ScrollView,
@@ -15,6 +16,7 @@ import {
 } from 'react-native';
 import * as Location from 'expo-location';
 import * as Crypto from 'expo-crypto';
+import * as AppleAuthentication from 'expo-apple-authentication';
 import Purchases from 'react-native-purchases';
 import RevenueCatUI from 'react-native-purchases-ui';
 
@@ -29,10 +31,12 @@ async function loadRevenueCatUI() {
 import { useAuth } from '@/context/AuthContext';
 import { isRunningInExpoGo } from '@/lib/expoGo';
 import { supabase } from '@/lib/supabase';
-import { Business, UserRole } from '@/lib/types';
+import { Business, UserRole, isAutoLinkCollisionError } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
 import ProfileScreen from './profile';
 import { OnboardingTutorial } from '@/components/OnboardingTutorial';
+import { StaticPinPickerModal } from '@/components/StaticPinPickerModal';
+import { matchBlockedChain } from '@/lib/chainDenylist';
 
 const CLAIM_RADIUS_MILES = 0.1;
 const DEEP_LINK =
@@ -43,8 +47,13 @@ export default function LoginScreen() {
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirm, setPasswordConfirm] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authRole, setAuthRole] = useState<UserRole | null>(null);
+  // Auth form mode: 'signIn' (default, for return users) or 'signUp' (create
+  // account). Switched via the segmented control at the top of the form card.
+  // Replaces the old "bottom link that secretly submits as signup" pattern.
+  const [mode, setMode] = useState<'signIn' | 'signUp'>('signIn');
 
   const [ownedBusinesses, setOwnedBusinesses] = useState<Business[]>([]);
   const [selectedBusinessId, setSelectedBusinessId] = useState<string | null>(
@@ -80,6 +89,27 @@ export default function LoginScreen() {
   const [pinLockSaving, setPinLockSaving] = useState(false);
   const [showOwnerProfile, setShowOwnerProfile] = useState(false);
   const [showOwnerTutorial, setShowOwnerTutorial] = useState(false);
+  const [staticPinPickerTargetId, setStaticPinPickerTargetId] = useState<
+    string | null
+  >(null);
+  const [staticPinSaving, setStaticPinSaving] = useState(false);
+
+  // Owner action gate — requires the owner's Supabase auth password before
+  // firing destructive or financially-impactful actions. Prevents an employee
+  // with an unlocked phone from:
+  //   - deleting a business (data loss)
+  //   - upgrading to a higher subscription tier (unauthorized charge)
+  //   - cancelling or downgrading a subscription (service loss / data loss on
+  //     pins that depend on the higher tier)
+  // All three paths now funnel through the same modal + re-auth flow.
+  type OwnerGateAction =
+    | { kind: 'delete_business'; businessId: string }
+    | { kind: 'open_paywall'; entitlement: 'single_pin' | 'dual_pin' }
+    | { kind: 'manage_subscription' };
+
+  const [ownerGateAction, setOwnerGateAction] = useState<OwnerGateAction | null>(null);
+  const [ownerGatePassword, setOwnerGatePassword] = useState('');
+  const [ownerGateSaving, setOwnerGateSaving] = useState(false);
 
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
@@ -175,14 +205,7 @@ export default function LoginScreen() {
     setAuthLoading(false);
 
     if (error) {
-      if (error.message.includes('Email not confirmed')) {
-        Alert.alert(
-          'Verify Your Email',
-          'You need to click the confirmation link we sent to your email before logging in. Check your spam folder!'
-        );
-      } else {
-        Alert.alert('Sign In Failed', error.message);
-      }
+      Alert.alert('Sign In Failed', error.message);
     }
   };
 
@@ -191,8 +214,18 @@ export default function LoginScreen() {
       Alert.alert('Missing Fields', 'Enter your email and password.');
       return;
     }
-    if (password.length < 6) {
-      Alert.alert('Weak Password', 'Password must be at least 6 characters.');
+    // 8-char minimum (up from 6). Only enforced on signup — existing users
+    // with 6-char passwords are grandfathered via handleSignIn. App Store
+    // reviewers have flagged 6-char minimums in other apps.
+    if (password.length < 8) {
+      Alert.alert('Weak Password', 'Password must be at least 8 characters.');
+      return;
+    }
+    if (password !== passwordConfirm) {
+      Alert.alert(
+        "Passwords Don't Match",
+        'Re-enter the same password in both fields.'
+      );
       return;
     }
     setAuthLoading(true);
@@ -201,7 +234,167 @@ export default function LoginScreen() {
     if (error) {
       Alert.alert('Sign Up Failed', error.message);
     } else {
-      Alert.alert('Check Your Email', 'We sent you a confirmation link.');
+      // With Supabase "Confirm email" disabled, signUp returns an active
+      // session immediately — AuthContext's onAuthStateChange will push the
+      // user into the signed-in UI. This alert is a courtesy confirmation,
+      // not a "please check your inbox" (which would be a lie).
+      Alert.alert('Account Created', "You're all set — you've been signed in.");
+    }
+  };
+
+  // Opens an external URL in the system browser. Used for ToS / Privacy
+  // links in the sign-up agreement line. If the URL can't be opened
+  // (simulator without a browser, unlikely on real device) we fall back to
+  // an alert so the user sees the URL as plain text and can copy it.
+  const openUrlOrAlert = async (url: string) => {
+    try {
+      const canOpen = await Linking.canOpenURL(url);
+      if (canOpen) {
+        await Linking.openURL(url);
+        return;
+      }
+    } catch {
+      // fall through to alert
+    }
+    Alert.alert('Link', url);
+  };
+
+  const handleForgotPassword = async () => {
+    // Sends a Supabase password-reset email. The link routes back into the
+    // app via the `vibeathon://login` deep link (same scheme used for email
+    // confirmation). A full in-app "set new password" flow ships in Track
+    // 2.5b — for now, the user taps the link, lands on the app's default
+    // sign-in screen, and can then use whatever temporary access Supabase
+    // grants to set a new password. If they're on a desktop with no app
+    // installed, they'll hit the webpage redirect (not yet wired) — document
+    // as a known gap until 2.5b lands.
+    if (!email) {
+      Alert.alert(
+        'Enter your email',
+        'Type the email for your account first — we’ll send a reset link there.'
+      );
+      return;
+    }
+    setAuthLoading(true);
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: 'vibeathon://login',
+    });
+    setAuthLoading(false);
+    if (error) {
+      Alert.alert('Reset Failed', error.message);
+      return;
+    }
+    Alert.alert(
+      'Check your email',
+      `We sent a password-reset link to ${email}. Tap it from your phone to come back into the app.`
+    );
+  };
+
+  const handleAppleSignIn = async () => {
+    // Sign in with Apple — native iOS flow.
+    //
+    // Nonce contract:
+    //   - We generate a random `rawNonce` and hash it with SHA-256 before
+    //     handing it to Apple. Apple signs an identity token whose `nonce`
+    //     claim is the HASHED value.
+    //   - We then pass the RAW nonce (not the hash) to Supabase. Supabase
+    //     re-hashes it and compares to the claim in the JWT. If they match,
+    //     the token is proven fresh and not replayable.
+    //   - If we passed the hashed value to Supabase, the comparison would
+    //     fail. This is the #1 footgun in Apple-on-Supabase setups.
+    //
+    // Collision handling:
+    //   - Supabase auto-links the Apple identity to any existing user whose
+    //     email matches AND is already verified. For users whose email is
+    //     unverified (currently only pre-Path-3 signups, now zero in prod),
+    //     auto-link is blocked. `isAutoLinkCollisionError` catches that
+    //     case so we can prompt the user to sign in with password first.
+    try {
+      const rawNonce = Crypto.randomUUID();
+      const hashedNonce = await Crypto.digestStringAsync(
+        Crypto.CryptoDigestAlgorithm.SHA256,
+        rawNonce
+      );
+
+      setAuthLoading(true);
+
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+        nonce: hashedNonce,
+      });
+
+      if (!credential.identityToken) {
+        Alert.alert(
+          'Sign In Failed',
+          "Apple didn't return an identity token. Try again, or use email and password."
+        );
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithIdToken({
+        provider: 'apple',
+        token: credential.identityToken,
+        nonce: rawNonce,
+      });
+
+      if (error) {
+        if (isAutoLinkCollisionError(error)) {
+          Alert.alert(
+            'Email Already in Use',
+            'That email is already tied to a Downtown Vibes account. Sign in with your password first, then add Apple sign-in from Account settings.'
+          );
+        } else {
+          Alert.alert('Sign In Failed', error.message);
+        }
+        return;
+      }
+
+      // On first sign-in only, Apple returns `fullName` and `email`. We seize
+      // the chance to persist the name and — for brand-new users — the role
+      // picker's current selection (owner vs customer). On subsequent sign-ins
+      // `credential.fullName` is null, which is why this runs once.
+      const nextMetadata: Record<string, string> = {};
+      const existingRole = data.user?.user_metadata?.role as UserRole | undefined;
+      if (!existingRole) {
+        nextMetadata.role = authRole ?? 'customer';
+      }
+      if (credential.fullName) {
+        const fullName = [
+          credential.fullName.givenName,
+          credential.fullName.familyName,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+        if (fullName) nextMetadata.full_name = fullName;
+      }
+      if (Object.keys(nextMetadata).length > 0) {
+        const { error: updateErr } = await supabase.auth.updateUser({
+          data: nextMetadata,
+        });
+        if (updateErr) {
+          // Non-fatal — the user is signed in, metadata is cosmetic. Log for
+          // diagnostics but don't block the UI transition.
+          console.warn('Apple sign-in metadata update failed:', updateErr.message);
+        }
+      }
+      // AuthContext.onAuthStateChange flips the UI to the signed-in view — no
+      // explicit navigation needed here.
+    } catch (err: any) {
+      // `ERR_REQUEST_CANCELED` fires when the user dismisses the Apple sheet.
+      // Silent is correct — no toast, no error noise.
+      if (err?.code === 'ERR_REQUEST_CANCELED') {
+        return;
+      }
+      Alert.alert(
+        'Sign In Failed',
+        err?.message ?? 'Something went wrong with Apple sign-in. Try again.'
+      );
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -211,6 +404,19 @@ export default function LoginScreen() {
       const name = newBusinessName.trim();
       if (!name) {
         Alert.alert('Missing Name', 'Enter your business name to continue.');
+        return;
+      }
+
+      // Chain denylist check. National chains are not claimable in v1 because
+      // we don't yet have a verification flow. A defense-in-depth DB trigger
+      // enforces the same rule server-side; this is the friendly-UX path.
+      const matchedChain = matchBlockedChain(name);
+      if (matchedChain) {
+        Alert.alert(
+          'This business is not claimable',
+          `"${matchedChain}" is a national chain and can't be claimed in Downtown Vibes. This app is for independent local businesses. ` +
+            `\n\nIf you're a franchisee or manager, email support@potionsandfamiliars.com and we'll help you get listed under a disambiguated name.`
+        );
         return;
       }
 
@@ -368,49 +574,159 @@ export default function LoginScreen() {
     );
   }, [user, deletingAccount, signOut]);
 
+  // Open the owner gate modal for a given action. Caller supplies the
+  // discriminated action; the confirm handler below dispatches on `kind`
+  // after a successful re-auth.
+  const requestOwnerGate = useCallback((action: OwnerGateAction) => {
+    setOwnerGateAction(action);
+    setOwnerGatePassword('');
+  }, []);
+
+  const closeOwnerGate = useCallback(() => {
+    if (ownerGateSaving) return;
+    setOwnerGateAction(null);
+    setOwnerGatePassword('');
+  }, [ownerGateSaving]);
+
   const handleDeleteBusiness = useCallback(
     (businessId: string) => {
       if (!user || deletingBusinessId) return;
 
+      // Step 1 — soft confirm. On "Continue" we open the owner gate modal.
+      // Nothing is deleted until the owner re-enters their account password.
       Alert.alert(
         'Delete Business?',
-        'Are you sure you want to permanently delete this business and its pin? This action cannot be undone.',
+        'This permanently deletes this business and its pin. You will be asked to re-enter your account password to continue.',
         [
           { text: 'Cancel', style: 'cancel' },
           {
-            text: 'Delete',
+            text: 'Continue',
             style: 'destructive',
-            onPress: async () => {
-              try {
-                setDeletingBusinessId(businessId);
-
-                const { error } = await supabase
-                  .from('businesses')
-                  .delete()
-                  .eq('id', businessId);
-
-                if (error) {
-                  Alert.alert('Error', error.message);
-                  return;
-                }
-
-                await fetchBusinessData(user.id);
-              } catch (err: any) {
-                console.warn('Delete business error:', err);
-                Alert.alert(
-                  'Error',
-                  err?.message ?? 'Could not delete this business. Please try again.'
-                );
-              } finally {
-                setDeletingBusinessId(null);
-              }
+            onPress: () => {
+              requestOwnerGate({ kind: 'delete_business', businessId });
             },
           },
         ]
       );
     },
-    [user, deletingBusinessId]
+    [user, deletingBusinessId, requestOwnerGate]
   );
+
+  const handleRequestUpgrade = useCallback(
+    (entitlement: 'single_pin' | 'dual_pin') => {
+      Alert.alert(
+        'Upgrade Subscription?',
+        'Upgrading will charge the Apple ID or Google account signed into this device. You will be asked to re-enter your account password to continue.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Continue',
+            onPress: () =>
+              requestOwnerGate({ kind: 'open_paywall', entitlement }),
+          },
+        ]
+      );
+    },
+    [requestOwnerGate]
+  );
+
+  const handleRequestManageSubscription = useCallback(() => {
+    if (isRunningInExpoGo) {
+      Alert.alert(
+        'Expo Go',
+        'Subscription management is not available in Expo Go. Use a development build to test RevenueCat.'
+      );
+      return;
+    }
+    Alert.alert(
+      'Manage Subscription?',
+      'Changing or cancelling your subscription can affect billing and may disable pins that depend on your current tier. You will be asked to re-enter your account password to continue.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          onPress: () => requestOwnerGate({ kind: 'manage_subscription' }),
+        },
+      ]
+    );
+  }, [requestOwnerGate]);
+
+  // Single confirm handler for every gated owner action. Verifies the
+  // current user's auth password via supabase.auth.signInWithPassword
+  // (which doubles as a re-auth check), then dispatches to the matching
+  // side effect.
+  const handleConfirmOwnerGate = useCallback(async () => {
+    if (!user || !ownerGateAction || ownerGateSaving) return;
+
+    const password = ownerGatePassword;
+    if (!password) {
+      Alert.alert('Password Required', 'Enter your account password to continue.');
+      return;
+    }
+    if (!user.email) {
+      Alert.alert(
+        'Cannot Verify',
+        'No email on this account. Please sign out and back in, then try again.'
+      );
+      return;
+    }
+
+    try {
+      setOwnerGateSaving(true);
+
+      // Verify the password by attempting a sign-in with the current email.
+      // This refreshes the session but does not log the user out on success.
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password,
+      });
+      if (authError) {
+        Alert.alert('Incorrect Password', 'That password did not match. Please try again.');
+        return;
+      }
+
+      // Re-auth succeeded — dispatch to the pending action.
+      const action = ownerGateAction;
+
+      if (action.kind === 'delete_business') {
+        setDeletingBusinessId(action.businessId);
+        const { error: deleteError } = await supabase
+          .from('businesses')
+          .delete()
+          .eq('id', action.businessId);
+
+        if (deleteError) {
+          Alert.alert('Error', deleteError.message);
+          return;
+        }
+        await fetchBusinessData(user.id);
+      } else if (action.kind === 'open_paywall') {
+        setPaywallEntitlement(action.entitlement);
+        setShowPaywall(true);
+      } else if (action.kind === 'manage_subscription') {
+        try {
+          const rcUI = await loadRevenueCatUI();
+          await rcUI.default.presentCustomerCenter();
+        } catch {
+          Alert.alert('Error', 'Could not open subscription management.');
+          return;
+        }
+      }
+
+      // Success — tear down the gate.
+      setOwnerGateAction(null);
+      setOwnerGatePassword('');
+    } catch (err: any) {
+      console.warn('Owner gate action error:', err);
+      Alert.alert(
+        'Error',
+        err?.message ?? 'Could not complete this action. Please try again.'
+      );
+    } finally {
+      setDeletingBusinessId(null);
+      setOwnerGateSaving(false);
+    }
+  }, [user, ownerGateAction, ownerGateSaving, ownerGatePassword]);
 
   const normalizeUrl = (raw: string): string | null => {
     const trimmed = raw.trim();
@@ -516,7 +832,11 @@ export default function LoginScreen() {
   const handleUpdateLocation = async (businessId: string) => {
     const biz = ownedBusinesses.find((b) => b.id === businessId);
     if (!biz) return;
-    if (biz.is_pin_locked) {
+    // Pin lock only blocks single-tier accounts. For dual-tier, the lock is
+    // conceptually guarding the static brick-and-mortar pin, which this
+    // function does not touch — only the mobile/secondary pin moves here.
+    const isDual = biz.account_tier === 'dual';
+    if (biz.is_pin_locked && !isDual) {
       Alert.alert(
         'Pin Locked',
         'This pin is locked. Unlock pin location to update it.'
@@ -727,6 +1047,59 @@ export default function LoginScreen() {
     }
   };
 
+  const openStaticPinPicker = (businessId: string) => {
+    const biz = ownedBusinesses.find((b) => b.id === businessId);
+    if (!biz) return;
+    // The lock is specifically here to protect the static / brick-and-mortar
+    // pin. No dual-tier escape hatch on this one.
+    if (biz.is_pin_locked) {
+      Alert.alert(
+        'Pin Locked',
+        'Unlock this pin to change your brick-and-mortar location.'
+      );
+      return;
+    }
+    setStaticPinPickerTargetId(businessId);
+  };
+
+  const handleConfirmStaticPin = async (
+    latitude: number,
+    longitude: number
+  ) => {
+    if (!staticPinPickerTargetId) return;
+    const businessId = staticPinPickerTargetId;
+    setStaticPinSaving(true);
+    try {
+      const { data, error } = await supabase
+        .from('businesses')
+        .update({
+          static_latitude: latitude,
+          static_longitude: longitude,
+        })
+        .eq('id', businessId)
+        .select()
+        .single();
+
+      if (error) {
+        Alert.alert('Error', error.message);
+        return;
+      }
+      if (data) {
+        const row = data as unknown as Business;
+        setOwnedBusinesses((prev) =>
+          prev.map((b) => (b.id === row.id ? row : b))
+        );
+      }
+      setStaticPinPickerTargetId(null);
+      Alert.alert(
+        'Location Set',
+        'Your brick-and-mortar pin has been updated.'
+      );
+    } finally {
+      setStaticPinSaving(false);
+    }
+  };
+
   // ─── Loading spinner ─────────────────────────────────────────
   if (loading) {
     return (
@@ -800,68 +1173,164 @@ export default function LoginScreen() {
                 </TouchableOpacity>
 
                 <View style={styles.bizPinCardActionStack}>
-                  {!biz.is_pin_locked ? (
-                    <TouchableOpacity
-                      style={[
-                        styles.bizCardUpdatePinBtn,
-                        locBusy && styles.btnDisabled,
-                      ]}
-                      onPress={() => handleUpdateLocation(biz.id)}
-                      disabled={!!locBusy}
-                      activeOpacity={0.85}
-                    >
-                      {locBusy ? (
-                        <ActivityIndicator color="#FFFFFF" />
-                      ) : (
-                        <Text style={styles.bizCardUpdatePinBtnText}>
-                          📍 Update Pin Location
-                        </Text>
-                      )}
-                    </TouchableOpacity>
-                  ) : null}
-
-                  <TouchableOpacity
-                    style={[
-                      styles.bizCardLockPinBtn,
-                      !biz.is_pin_locked && styles.bizCardActionBtnSpacing,
-                      (pinLockSaving || locBusy) && styles.btnDisabled,
-                    ]}
-                    onPress={() =>
-                      biz.is_pin_locked
-                        ? openUnlockPinModal(biz.id)
-                        : openLockPinModal(biz.id)
-                    }
-                    disabled={pinLockSaving || !!locBusy}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={styles.bizCardLockPinBtnText}>
-                      {biz.is_pin_locked
-                        ? 'Unlock Pin Location'
-                        : 'Lock Pin Location'}
-                    </Text>
-                  </TouchableOpacity>
-
                   {isDual ? (
-                    <TouchableOpacity
-                      style={[
-                        styles.bizCardRemoveTravelingBtn,
-                        styles.bizCardActionBtnSpacing,
-                        locBusy && styles.btnDisabled,
-                      ]}
-                      onPress={() => handleRemoveTravelingPin(biz.id)}
-                      disabled={!!locBusy}
-                      activeOpacity={0.85}
-                    >
-                      <Text style={styles.bizCardRemoveTravelingBtnText}>
-                        🧹 Remove Traveling Pin
+                    <>
+                      {/* ── 🏠 Brick-and-Mortar section ─────────────── */}
+                      <View style={styles.pinSection}>
+                        <Text style={styles.pinSectionTitle}>
+                          🏠 Brick-and-Mortar Pin
+                        </Text>
+                        <Text style={styles.pinSectionHelp}>
+                          Your permanent storefront location.
+                        </Text>
+
+                        <TouchableOpacity
+                          style={[
+                            styles.bizCardSetStaticBtn,
+                            (locBusy || biz.is_pin_locked) &&
+                              styles.btnDisabled,
+                          ]}
+                          onPress={() => openStaticPinPicker(biz.id)}
+                          disabled={!!locBusy}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={styles.bizCardSetStaticBtnText}>
+                            {biz.is_pin_locked
+                              ? '🔒 Brick-and-Mortar Locked'
+                              : '🏠 Set Location'}
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[
+                            styles.bizCardLockPinBtn,
+                            styles.bizCardActionBtnSpacing,
+                            (pinLockSaving || locBusy) && styles.btnDisabled,
+                          ]}
+                          onPress={() =>
+                            biz.is_pin_locked
+                              ? openUnlockPinModal(biz.id)
+                              : openLockPinModal(biz.id)
+                          }
+                          disabled={pinLockSaving || !!locBusy}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={styles.bizCardLockPinBtnText}>
+                            {biz.is_pin_locked
+                              ? '🔓 Unlock Pin Location'
+                              : '🔒 Lock Pin Location'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* ── 🚚 Traveling Pin section ────────────────── */}
+                      <View
+                        style={[
+                          styles.pinSection,
+                          styles.pinSectionSpacing,
+                        ]}
+                      >
+                        <Text style={styles.pinSectionTitle}>
+                          🚚 Traveling Pin
+                        </Text>
+                        <Text style={styles.pinSectionHelp}>
+                          Live-tracking pin for food trucks and pop-ups.
+                        </Text>
+
+                        <TouchableOpacity
+                          style={[
+                            styles.bizCardUpdatePinBtn,
+                            locBusy && styles.btnDisabled,
+                          ]}
+                          onPress={() => handleUpdateLocation(biz.id)}
+                          disabled={!!locBusy}
+                          activeOpacity={0.85}
+                        >
+                          {locBusy ? (
+                            <ActivityIndicator color="#FFFFFF" />
+                          ) : (
+                            <Text style={styles.bizCardUpdatePinBtnText}>
+                              📍 Move to my location
+                            </Text>
+                          )}
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[
+                            styles.bizCardRemoveTravelingBtn,
+                            styles.bizCardActionBtnSpacing,
+                            locBusy && styles.btnDisabled,
+                          ]}
+                          onPress={() => handleRemoveTravelingPin(biz.id)}
+                          disabled={!!locBusy}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={styles.bizCardRemoveTravelingBtnText}>
+                            🧹 Remove from Map
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  ) : (
+                    // ── Single-tier: one simpler section ─────────────
+                    <View style={styles.pinSection}>
+                      <Text style={styles.pinSectionTitle}>
+                        📍 Pin Location
                       </Text>
-                    </TouchableOpacity>
-                  ) : null}
+                      <Text style={styles.pinSectionHelp}>
+                        Your business pin on the map.
+                      </Text>
+
+                      {!biz.is_pin_locked ? (
+                        <TouchableOpacity
+                          style={[
+                            styles.bizCardUpdatePinBtn,
+                            locBusy && styles.btnDisabled,
+                          ]}
+                          onPress={() => handleUpdateLocation(biz.id)}
+                          disabled={!!locBusy}
+                          activeOpacity={0.85}
+                        >
+                          {locBusy ? (
+                            <ActivityIndicator color="#FFFFFF" />
+                          ) : (
+                            <Text style={styles.bizCardUpdatePinBtnText}>
+                              📍 Move to my location
+                            </Text>
+                          )}
+                        </TouchableOpacity>
+                      ) : null}
+
+                      <TouchableOpacity
+                        style={[
+                          styles.bizCardLockPinBtn,
+                          !biz.is_pin_locked &&
+                            styles.bizCardActionBtnSpacing,
+                          (pinLockSaving || locBusy) && styles.btnDisabled,
+                        ]}
+                        onPress={() =>
+                          biz.is_pin_locked
+                            ? openUnlockPinModal(biz.id)
+                            : openLockPinModal(biz.id)
+                        }
+                        disabled={pinLockSaving || !!locBusy}
+                        activeOpacity={0.85}
+                      >
+                        <Text style={styles.bizCardLockPinBtnText}>
+                          {biz.is_pin_locked
+                            ? '🔓 Unlock Pin Location'
+                            : '🔒 Lock Pin Location'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {/* Divider separating pin actions from destructive action */}
+                  <View style={styles.bizCardDivider} />
 
                   <TouchableOpacity
                     style={[
                       styles.bizCardDeleteBtn,
-                      styles.bizCardActionBtnSpacing,
                       deletingBusinessId === biz.id && styles.btnDisabled,
                     ]}
                     onPress={() => handleDeleteBusiness(biz.id)}
@@ -883,10 +1352,7 @@ export default function LoginScreen() {
             <View style={styles.upgradeBlock}>
               <TouchableOpacity
                 style={styles.upgradeBtn}
-                onPress={() => {
-                  setPaywallEntitlement('dual_pin');
-                  setShowPaywall(true);
-                }}
+                onPress={() => handleRequestUpgrade('dual_pin')}
                 activeOpacity={0.85}
               >
                 <Text style={styles.upgradeBtnText}>
@@ -973,7 +1439,7 @@ export default function LoginScreen() {
           <View style={styles.card}>
             <Text style={styles.cardLabel}>Business Type</Text>
             <View style={styles.typeRow}>
-              {(['restaurant', 'bar', 'retail', 'traveling'] as const).map((t) => {
+              {(['restaurant', 'bar', 'retail', 'coffee'] as const).map((t) => {
                 const active = businessType === t;
                 const label =
                   t === 'restaurant'
@@ -982,7 +1448,7 @@ export default function LoginScreen() {
                       ? 'Bar'
                       : t === 'retail'
                         ? 'Retail'
-                        : 'Traveling';
+                        : 'Coffee';
                 return (
                   <TouchableOpacity
                     key={t}
@@ -1057,20 +1523,7 @@ export default function LoginScreen() {
 
           <TouchableOpacity
             style={styles.manageSubBtn}
-            onPress={() => {
-              if (isRunningInExpoGo) {
-                Alert.alert(
-                  'Expo Go',
-                  'Subscription management is not available in Expo Go. Use a development build to test RevenueCat.'
-                );
-                return;
-              }
-              loadRevenueCatUI()
-                .then((rcUI) => rcUI.default.presentCustomerCenter())
-                .catch(() =>
-                  Alert.alert('Error', 'Could not open subscription management.')
-                );
-            }}
+            onPress={handleRequestManageSubscription}
           >
             <Text style={styles.manageSubBtnText}>Manage Subscription</Text>
           </TouchableOpacity>
@@ -1167,7 +1620,7 @@ export default function LoginScreen() {
                 </Text>
                 <Text style={styles.pinLockSubtext}>
                   {pinLockMode === 'lock'
-                    ? 'Choose a password. While locked, Update Pin Location is hidden until you unlock.'
+                    ? 'Choose a password. While locked, this pin stays put until you unlock it. (Dual-tier traveling pins are not affected.)'
                     : 'Enter your pin lock password to allow moving this pin again.'}
                 </Text>
                 <TextInput
@@ -1217,6 +1670,97 @@ export default function LoginScreen() {
             </View>
           </Modal>
 
+          {/* Owner action gate — single re-auth modal used by Delete Business,
+              Upgrade Subscription, and Manage Subscription. Title / subtitle /
+              CTA copy switches based on `ownerGateAction.kind`. */}
+          <Modal
+            visible={!!ownerGateAction}
+            transparent
+            animationType="fade"
+            onRequestClose={closeOwnerGate}
+          >
+            <View style={styles.pinLockBackdrop}>
+              <View style={styles.pinLockCard}>
+                {(() => {
+                  const action = ownerGateAction;
+                  if (!action) return null;
+
+                  let title = 'Confirm Action';
+                  let subtitle = 'Enter your account password to continue.';
+                  let ctaLabel = 'Confirm';
+                  let ctaStyle = styles.pinLockPrimaryBtn;
+                  let ctaTextStyle = styles.pinLockPrimaryText;
+
+                  if (action.kind === 'delete_business') {
+                    const bizName =
+                      ownedBusinesses.find((b) => b.id === action.businessId)
+                        ?.business_name ?? '';
+                    title = `Delete Business${bizName ? ` — ${bizName}` : ''}`;
+                    subtitle =
+                      'Enter your account password to permanently delete this business and its pin. This cannot be undone.';
+                    ctaLabel = 'Delete Business';
+                    ctaStyle = styles.deleteBizConfirmBtn;
+                    ctaTextStyle = styles.deleteBizConfirmText;
+                  } else if (action.kind === 'open_paywall') {
+                    title =
+                      action.entitlement === 'dual_pin'
+                        ? 'Upgrade to Dual-Pin (Pro)'
+                        : 'Upgrade Subscription';
+                    subtitle =
+                      'Enter your account password to open the paywall. This protects against unauthorized purchases on the device.';
+                    ctaLabel = 'Continue to Paywall';
+                  } else if (action.kind === 'manage_subscription') {
+                    title = 'Manage Subscription';
+                    subtitle =
+                      'Enter your account password to open subscription management. Cancelling or downgrading can disable pins that depend on your current tier.';
+                    ctaLabel = 'Continue';
+                  }
+
+                  return (
+                    <>
+                      <Text style={styles.pinLockTitle}>{title}</Text>
+                      <Text style={styles.pinLockSubtext}>{subtitle}</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={ownerGatePassword}
+                        onChangeText={setOwnerGatePassword}
+                        placeholder="Account password"
+                        placeholderTextColor="#9CA3AF"
+                        secureTextEntry
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                      />
+                      <View style={styles.pinLockBtnRow}>
+                        <TouchableOpacity
+                          style={[
+                            ctaStyle,
+                            ownerGateSaving && styles.btnDisabled,
+                          ]}
+                          onPress={handleConfirmOwnerGate}
+                          disabled={ownerGateSaving}
+                        >
+                          {ownerGateSaving ? (
+                            <ActivityIndicator color="#FFF" size="small" />
+                          ) : (
+                            <Text style={ctaTextStyle}>{ctaLabel}</Text>
+                          )}
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.pinLockCancelBtn}
+                          onPress={closeOwnerGate}
+                          disabled={ownerGateSaving}
+                        >
+                          <Text style={styles.pinLockCancelText}>Cancel</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  );
+                })()}
+              </View>
+            </View>
+          </Modal>
+
           {/* Owner: Vibe Checks & Favorites modal */}
           <Modal
             visible={showOwnerProfile}
@@ -1241,6 +1785,32 @@ export default function LoginScreen() {
           <OnboardingTutorial
             visible={showOwnerTutorial}
             onFinish={() => setShowOwnerTutorial(false)}
+          />
+
+          <StaticPinPickerModal
+            visible={!!staticPinPickerTargetId}
+            businessName={
+              ownedBusinesses.find((b) => b.id === staticPinPickerTargetId)
+                ?.business_name ?? ''
+            }
+            initialLatitude={
+              ownedBusinesses.find((b) => b.id === staticPinPickerTargetId)
+                ?.static_latitude ??
+              ownedBusinesses.find((b) => b.id === staticPinPickerTargetId)
+                ?.latitude ??
+              null
+            }
+            initialLongitude={
+              ownedBusinesses.find((b) => b.id === staticPinPickerTargetId)
+                ?.static_longitude ??
+              ownedBusinesses.find((b) => b.id === staticPinPickerTargetId)
+                ?.longitude ??
+              null
+            }
+            onCancel={() => {
+              if (!staticPinSaving) setStaticPinPickerTargetId(null);
+            }}
+            onConfirm={handleConfirmStaticPin}
           />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -1280,7 +1850,7 @@ export default function LoginScreen() {
 
             <Text style={[styles.label, { marginTop: 18 }]}>Business Type</Text>
             <View style={styles.typeRow}>
-              {(['restaurant', 'bar', 'retail', 'traveling'] as const).map((t) => {
+              {(['restaurant', 'bar', 'retail', 'coffee'] as const).map((t) => {
                 const active = businessType === t;
                 const label =
                   t === 'restaurant'
@@ -1289,7 +1859,7 @@ export default function LoginScreen() {
                       ? 'Bar'
                       : t === 'retail'
                         ? 'Retail'
-                        : 'Traveling';
+                        : 'Coffee';
                 return (
                   <TouchableOpacity
                     key={t}
@@ -1506,6 +2076,32 @@ export default function LoginScreen() {
   }
 
   // ─── Guest: Auth form (shared by both roles) ──────────────────
+  //
+  // Two orthogonal pieces of state drive this screen:
+  //   - `authRole`  — customer | owner (picked on the previous screen).
+  //                   Shown as a tappable chip at the top so the user can
+  //                   see and change their role without hunting for a Back
+  //                   button. Tap chip → returns to role picker.
+  //   - `mode`      — signIn | signUp. Tabs at the top of the form card.
+  //                   Controls: tagline copy, primary CTA label, primary CTA
+  //                   handler, Apple button type, visibility of forgot-
+  //                   password link vs. confirm-password field, and the ToS
+  //                   agreement line. ONE form, clearly labeled — this
+  //                   replaces the old "secondary button that silently
+  //                   submits as signup" pattern that confused first-time
+  //                   users.
+  //
+  // Copy is role-aware AND mode-aware. A Business Owner on Create Account
+  // gets different tagline flavor than a Customer on Sign In.
+  const isSignUp = mode === 'signUp';
+  const roleIsOwner = authRole === 'owner';
+  const tagline = isSignUp
+    ? roleIsOwner
+      ? "Let's claim your business"
+      : "Let's get you exploring"
+    : roleIsOwner
+      ? 'Welcome back — manage your business'
+      : 'Welcome back — pick up where you left off';
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -1516,30 +2112,91 @@ export default function LoginScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <TouchableOpacity
-          style={styles.backBtn}
-          onPress={() => setAuthRole(null)}
+          style={styles.roleChip}
+          activeOpacity={0.7}
+          onPress={() => {
+            // Going back to role picker — reset mode so the next entry is
+            // a clean sign-in by default, and clear confirm password.
+            setMode('signIn');
+            setPasswordConfirm('');
+            setAuthRole(null);
+          }}
+          accessibilityLabel={`Currently signing in as ${
+            roleIsOwner ? 'Business Owner' : 'Customer'
+          }. Tap to change role.`}
+          accessibilityRole="button"
         >
-          <Text style={styles.backBtnText}>← Back</Text>
+          <Text style={styles.roleChipText}>
+            {roleIsOwner ? '🏪 Business Owner' : '🔥 Customer'}
+            <Text style={styles.roleChipAction}>  •  change</Text>
+          </Text>
         </TouchableOpacity>
 
         <Text style={styles.logo}>DowntownVibes</Text>
-        <Text style={styles.tagline}>
-          {authRole === 'owner'
-            ? 'Sign in to manage your business'
-            : 'Sign in to start exploring'}
-        </Text>
+        <Text style={styles.tagline}>{tagline}</Text>
 
         <View style={styles.formCard}>
-          <Text style={styles.label}>Email</Text>
+          {/* ── Mode tabs ─────────────────────────────────────────
+              Segmented control. Tapping a tab flips `mode` and clears
+              `passwordConfirm` so stale data from the other mode doesn't
+              leak. Email + password values persist across mode switches so
+              a user who mistyped their intent doesn't have to retype. */}
+          <View style={styles.modeTabs}>
+            <TouchableOpacity
+              style={[
+                styles.modeTab,
+                !isSignUp && styles.modeTabActive,
+              ]}
+              onPress={() => {
+                setMode('signIn');
+                setPasswordConfirm('');
+              }}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: !isSignUp }}
+              accessibilityLabel="Sign In tab"
+            >
+              <Text
+                style={[
+                  styles.modeTabText,
+                  !isSignUp && styles.modeTabTextActive,
+                ]}
+              >
+                Sign In
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.modeTab,
+                isSignUp && styles.modeTabActive,
+              ]}
+              onPress={() => setMode('signUp')}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: isSignUp }}
+              accessibilityLabel="Create Account tab"
+            >
+              <Text
+                style={[
+                  styles.modeTabText,
+                  isSignUp && styles.modeTabTextActive,
+                ]}
+              >
+                Create Account
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={[styles.label, { marginTop: 18 }]}>Email</Text>
           <TextInput
             style={styles.input}
             value={email}
             onChangeText={setEmail}
             placeholder="you@example.com"
-            placeholderTextColor="#9CA3AF"
+            placeholderTextColor="#6B7280"
             keyboardType="email-address"
             autoCapitalize="none"
             autoComplete="email"
+            textContentType="emailAddress"
+            accessibilityLabel="Email address"
           />
 
           <Text style={[styles.label, { marginTop: 14 }]}>Password</Text>
@@ -1548,31 +2205,128 @@ export default function LoginScreen() {
             value={password}
             onChangeText={setPassword}
             placeholder="••••••••"
-            placeholderTextColor="#9CA3AF"
+            placeholderTextColor="#6B7280"
             secureTextEntry
+            // On signup, tell iOS Keychain this is a NEW password so it can
+            // offer Strong Password suggestion. On signin, it's an existing
+            // password — autofill should offer saved credentials instead.
+            autoComplete={isSignUp ? 'new-password' : 'current-password'}
+            textContentType={isSignUp ? 'newPassword' : 'password'}
+            accessibilityLabel={isSignUp ? 'Create a password' : 'Password'}
           />
+
+          {/* Sign-in: right-aligned forgot-password link.
+              Sign-up: confirm-password input.
+              Mutually exclusive to keep the form tight. */}
+          {!isSignUp && (
+            <TouchableOpacity
+              style={styles.forgotRow}
+              onPress={handleForgotPassword}
+              disabled={authLoading}
+              accessibilityRole="button"
+              accessibilityLabel="Forgot password"
+            >
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </TouchableOpacity>
+          )}
+
+          {isSignUp && (
+            <>
+              <Text style={[styles.label, { marginTop: 14 }]}>
+                Confirm password
+              </Text>
+              <TextInput
+                style={styles.input}
+                value={passwordConfirm}
+                onChangeText={setPasswordConfirm}
+                placeholder="••••••••"
+                placeholderTextColor="#6B7280"
+                secureTextEntry
+                autoComplete="new-password"
+                textContentType="newPassword"
+                accessibilityLabel="Confirm password"
+              />
+            </>
+          )}
 
           <TouchableOpacity
             style={[styles.primaryBtn, authLoading && styles.btnDisabled]}
-            onPress={handleSignIn}
+            onPress={isSignUp ? handleSignUp : handleSignIn}
             disabled={authLoading}
+            accessibilityRole="button"
+            accessibilityLabel={isSignUp ? 'Create Account' : 'Sign In'}
           >
             {authLoading ? (
               <ActivityIndicator color="#FFF" />
             ) : (
-              <Text style={styles.primaryBtnText}>Sign In</Text>
+              <Text style={styles.primaryBtnText}>
+                {isSignUp ? 'Create Account' : 'Sign In'}
+              </Text>
             )}
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.secondaryBtn}
-            onPress={handleSignUp}
-            disabled={authLoading}
-          >
-            <Text style={styles.secondaryBtnText}>
-              Don't have an account? Sign Up
+          {/*
+            Sign in with Apple — iOS only. Apple Guideline 4.8 requires an
+            Apple SSO option to be offered at least as prominently as any
+            third-party login (Google, Facebook, etc.), so this button sits
+            directly under the primary email/password sign-in with equal
+            visual weight. The AppleAuthenticationButton component uses the
+            Apple-branded asset and satisfies HIG requirements automatically;
+            do NOT replace it with a custom Text/Image button. We swap
+            `buttonType` based on mode so the label matches intent
+            ("Sign in with Apple" vs "Sign up with Apple").
+          */}
+          {Platform.OS === 'ios' && (
+            <>
+              <View style={styles.ssoDivider}>
+                <View style={styles.ssoDividerLine} />
+                <Text style={styles.ssoDividerText}>or</Text>
+                <View style={styles.ssoDividerLine} />
+              </View>
+              <AppleAuthentication.AppleAuthenticationButton
+                buttonType={
+                  isSignUp
+                    ? AppleAuthentication.AppleAuthenticationButtonType.SIGN_UP
+                    : AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN
+                }
+                buttonStyle={
+                  AppleAuthentication.AppleAuthenticationButtonStyle.BLACK
+                }
+                cornerRadius={12}
+                style={styles.appleBtn}
+                onPress={handleAppleSignIn}
+              />
+            </>
+          )}
+
+          {/* Privacy Policy line — only in signup mode. App Store review
+              requires a visible Privacy Policy link on any screen that
+              creates an account. We only have one document right now
+              (published on the Potions & Familiars Wix site), so the line
+              reads as a single-link agreement. When a real Terms of
+              Service document ships at its own URL, add a second link here
+              and reword to "agree to our Terms of Service and Privacy
+              Policy." The URL below is what's registered in App Store
+              Connect's App Privacy → Privacy Policy URL field, so keeping
+              these two in sync avoids a "your app's policy link doesn't
+              match App Store Connect" review flag. */}
+          {isSignUp && (
+            <Text style={styles.tosText}>
+              By creating an account you agree to our{' '}
+              <Text
+                style={styles.tosLink}
+                accessibilityRole="link"
+                onPress={() =>
+                  openUrlOrAlert(
+                    'https://www.potionsandfamiliars.com/downtown-vibes-terms'
+                  )
+                }
+              >
+                Privacy Policy
+              </Text>
+              .
             </Text>
-          </TouchableOpacity>
+          )}
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -1659,17 +2413,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  /* Back button */
-  backBtn: {
-    marginBottom: 16,
-    alignSelf: 'flex-start',
-  },
-  backBtnText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#6C3AED',
-  },
-
   /* Auth form */
   logo: {
     fontSize: 36,
@@ -1728,14 +2471,110 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 16,
   },
-  secondaryBtn: {
+  /* SSO (Apple / Google / Facebook) */
+  ssoDivider: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 16,
+    marginTop: 18,
+    marginBottom: 12,
   },
-  secondaryBtnText: {
-    color: '#6C3AED',
+  ssoDividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#E5E7EB',
+  },
+  ssoDividerText: {
+    marginHorizontal: 10,
+    color: '#9CA3AF',
+    fontSize: 12,
     fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  appleBtn: {
+    width: '100%',
+    height: 48,
+  },
+
+  /* Role chip — sits above the logo on the auth form. Shows which role the
+     user picked on the previous screen (Business Owner / Customer) and is
+     tappable to return to the role picker. Replaces the old "← Back"
+     button, which was correct functionally but invisible as a role cue. */
+  roleChip: {
+    alignSelf: 'center',
+    backgroundColor: '#EDE9FE',
+    borderRadius: 999,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    marginBottom: 16,
+  },
+  roleChipText: {
+    color: '#1F2937',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  roleChipAction: {
+    color: '#6C3AED',
+    fontWeight: '700',
+  },
+
+  /* Mode tabs — Sign In / Create Account segmented control at the top of
+     the auth form card. Active tab gets the brand purple + filled look;
+     inactive tab is neutral grey text. Taps flip `mode` state. */
+  modeTabs: {
+    flexDirection: 'row',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 10,
+    padding: 4,
+  },
+  modeTab: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modeTabActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  modeTabText: {
     fontSize: 14,
+    fontWeight: '700',
+    color: '#6B7280',
+  },
+  modeTabTextActive: {
+    color: '#6C3AED',
+  },
+
+  /* Forgot-password link — sits under the Password input in sign-in mode.
+     Right-aligned, small purple, tappable. */
+  forgotRow: {
+    alignSelf: 'flex-end',
+    marginTop: 8,
+  },
+  forgotText: {
+    color: '#6C3AED',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+
+  /* ToS / Privacy agreement copy — only shown in sign-up mode. Small
+     centered text with tappable links for Terms + Privacy. */
+  tosText: {
+    fontSize: 12,
+    color: '#6B7280',
+    textAlign: 'center',
+    marginTop: 14,
+    lineHeight: 18,
+    paddingHorizontal: 4,
+  },
+  tosLink: {
+    color: '#6C3AED',
+    fontWeight: '700',
   },
 
   /* Toggle row */
@@ -1899,6 +2738,37 @@ const styles = StyleSheet.create({
   bizCardActionBtnSpacing: {
     marginTop: 12,
   },
+  // Framed grouping around a set of pin-related buttons. Two sections on dual
+  // (brick-and-mortar + traveling), one section on single-tier.
+  pinSection: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    padding: 14,
+  },
+  pinSectionSpacing: {
+    marginTop: 14,
+  },
+  pinSectionTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#1F2937',
+    letterSpacing: 0.2,
+  },
+  pinSectionHelp: {
+    fontSize: 12,
+    color: '#6B7280',
+    marginTop: 2,
+    marginBottom: 12,
+    lineHeight: 16,
+  },
+  // Horizontal divider separating pin actions from the destructive Delete CTA
+  bizCardDivider: {
+    height: 1,
+    backgroundColor: '#E5E7EB',
+    marginVertical: 16,
+  },
   bizCardUpdatePinBtn: {
     width: '100%',
     backgroundColor: '#6C3AED',
@@ -1941,6 +2811,22 @@ const styles = StyleSheet.create({
   bizCardRemoveTravelingBtnText: {
     color: '#FFFFFF',
     fontWeight: '800',
+    fontSize: 15,
+  },
+  bizCardSetStaticBtn: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: '#6C3AED',
+  },
+  bizCardSetStaticBtnText: {
+    color: '#6C3AED',
+    fontWeight: '700',
     fontSize: 15,
   },
   bizCardDeleteBtn: {
@@ -2090,6 +2976,21 @@ const styles = StyleSheet.create({
   },
   pinLockCancelText: {
     color: '#6B7280',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  // Destructive primary button reused in the Delete Business password modal.
+  // Visually distinct from pinLockPrimaryBtn (purple) so a fat-finger tap can't
+  // be confused with a benign confirm.
+  deleteBizConfirmBtn: {
+    flex: 1,
+    backgroundColor: '#DC2626',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  deleteBizConfirmText: {
+    color: '#FFFFFF',
     fontWeight: '800',
     fontSize: 14,
   },
