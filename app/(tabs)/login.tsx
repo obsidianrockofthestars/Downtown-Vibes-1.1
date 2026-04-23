@@ -202,15 +202,15 @@ export default function LoginScreen() {
   //      cases like 1.4.2 users upgrading to 1.4.3) gets the same modal
   //      on app launch.
   //
-  // `setPasswordRequired` gates the Cancel button. In required mode, the
+  // `mpwRequired` gates the Cancel button. In required mode, the
   // only escape is the "Sign Out" button — dismissing without setting
   // would leave the user in a logged-in state with no way to do owner
   // actions, which defeats the point of SSO.
-  const [setPasswordVisible, setSetPasswordVisible] = useState(false);
-  const [setPasswordValue, setSetPasswordValue] = useState('');
-  const [setPasswordConfirm, setSetPasswordConfirm] = useState('');
-  const [setPasswordSaving, setSetPasswordSaving] = useState(false);
-  const [setPasswordRequired, setSetPasswordRequired] = useState(false);
+  const [mpwVisible, setMpwVisible] = useState(false);
+  const [mpwValue, setMpwValue] = useState('');
+  const [mpwConfirm, setMpwConfirm] = useState('');
+  const [mpwSaving, setMpwSaving] = useState(false);
+  const [mpwRequired, setMpwRequired] = useState(false);
 
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
@@ -362,17 +362,17 @@ export default function LoginScreen() {
   // double-check during boot).
   useEffect(() => {
     if (!user || loading) return;
-    if (setPasswordVisible) return;
+    if (mpwVisible) return;
     let cancelled = false;
     (async () => {
       const hasPwd = await checkUserHasPassword();
       if (cancelled) return;
       if (hasPwd === false) {
         // SSO-only user with no master password. Force set-password flow.
-        setSetPasswordValue('');
-        setSetPasswordConfirm('');
-        setSetPasswordRequired(true);
-        setSetPasswordVisible(true);
+        setMpwValue('');
+        setMpwConfirm('');
+        setMpwRequired(true);
+        setMpwVisible(true);
       }
       // hasPwd === true → user has password, no action needed.
       // hasPwd === null → unknown state (network issue); don't force the
@@ -382,7 +382,7 @@ export default function LoginScreen() {
     return () => {
       cancelled = true;
     };
-  }, [user, loading, setPasswordVisible, checkUserHasPassword]);
+  }, [user, loading, mpwVisible, checkUserHasPassword]);
 
   const handleSignIn = async () => {
     if (!email || !password) {
@@ -909,11 +909,11 @@ export default function LoginScreen() {
   // caveat as its subtitle copy, and requires password re-auth before the
   // delete_account RPC fires (see handleConfirmOwnerGate below).
   const handleDeleteAccount = useCallback(() => {
-    if (!user || deletingAccount || ownerGateSaving || setPasswordSaving) return;
+    if (!user || deletingAccount || ownerGateSaving || mpwSaving) return;
     // All password-gate routing lives inside `requestOwnerGate` below.
     // SSO-only users will transparently get the set-password modal first.
     requestOwnerGate({ kind: 'delete_account' });
-  }, [user, deletingAccount, ownerGateSaving, setPasswordSaving]);
+  }, [user, deletingAccount, ownerGateSaving, mpwSaving]);
 
   // Set the account password via `supabase.auth.updateUser({ password })`.
   // Called from the set-password modal. On OAuth-created users, this call
@@ -925,9 +925,9 @@ export default function LoginScreen() {
   // (not at time-of-destruction) is the whole security point — see the
   // state-declaration comment for threat-model context.
   const handleSetPassword = useCallback(async () => {
-    if (setPasswordSaving) return;
-    const pwd = setPasswordValue;
-    const confirm = setPasswordConfirm;
+    if (mpwSaving) return;
+    const pwd = mpwValue;
+    const confirm = mpwConfirm;
 
     if (pwd.length < 8) {
       Alert.alert(
@@ -944,7 +944,7 @@ export default function LoginScreen() {
       return;
     }
 
-    setSetPasswordSaving(true);
+    setMpwSaving(true);
     try {
       const { error } = await supabase.auth.updateUser({ password: pwd });
       if (error) {
@@ -952,10 +952,10 @@ export default function LoginScreen() {
         return;
       }
       // Success — tear down modal, confirm to user.
-      setSetPasswordVisible(false);
-      setSetPasswordValue('');
-      setSetPasswordConfirm('');
-      setSetPasswordRequired(false);
+      setMpwVisible(false);
+      setMpwValue('');
+      setMpwConfirm('');
+      setMpwRequired(false);
       Alert.alert(
         'Password Set',
         'Your master password is now protecting your account. You can still sign in with Google or Apple normally — this password is only used for account actions like delete, subscription changes, and locking your business pins.'
@@ -966,9 +966,9 @@ export default function LoginScreen() {
         err?.message ?? 'Could not set password. Please try again.'
       );
     } finally {
-      setSetPasswordSaving(false);
+      setMpwSaving(false);
     }
-  }, [setPasswordSaving, setPasswordValue, setPasswordConfirm]);
+  }, [mpwSaving, mpwValue, mpwConfirm]);
 
   // Dismiss the set-password modal. In REQUIRED mode (post-signup for SSO
   // users), there is no user-initiated dismiss — Cancel is replaced with
@@ -976,25 +976,25 @@ export default function LoginScreen() {
   // dismiss path (e.g. user opened modal from Account settings to change
   // their password voluntarily).
   const closeSetPassword = useCallback(() => {
-    if (setPasswordSaving) return;
-    if (setPasswordRequired) return; // no user-initiated dismiss in required mode
-    setSetPasswordVisible(false);
-    setSetPasswordValue('');
-    setSetPasswordConfirm('');
-  }, [setPasswordSaving, setPasswordRequired]);
+    if (mpwSaving) return;
+    if (mpwRequired) return; // no user-initiated dismiss in required mode
+    setMpwVisible(false);
+    setMpwValue('');
+    setMpwConfirm('');
+  }, [mpwSaving, mpwRequired]);
 
   // Sign out from the set-password modal's required-mode escape path. A user
   // who signed in via SSO but doesn't want to set a master password has
   // exactly this one option — can't use the app without either setting a
   // password or signing out.
   const handleSetPasswordSignOut = useCallback(async () => {
-    if (setPasswordSaving) return;
-    setSetPasswordVisible(false);
-    setSetPasswordValue('');
-    setSetPasswordConfirm('');
-    setSetPasswordRequired(false);
+    if (mpwSaving) return;
+    setMpwVisible(false);
+    setMpwValue('');
+    setMpwConfirm('');
+    setMpwRequired(false);
     await signOut();
-  }, [setPasswordSaving, signOut]);
+  }, [mpwSaving, signOut]);
 
   // Open the owner gate modal for a given action. Caller supplies the
   // discriminated action; the confirm handler below dispatches on `kind`
@@ -1031,10 +1031,10 @@ export default function LoginScreen() {
             {
               text: 'Set Password',
               onPress: () => {
-                setSetPasswordValue('');
-                setSetPasswordConfirm('');
-                setSetPasswordRequired(true);
-                setSetPasswordVisible(true);
+                setMpwValue('');
+                setMpwConfirm('');
+                setMpwRequired(true);
+                setMpwVisible(true);
               },
             },
           ]
@@ -2335,11 +2335,11 @@ export default function LoginScreen() {
           </Modal>
 
           {/* Set-account-password modal. Two modes:
-              - REQUIRED (`setPasswordRequired` true): shown immediately
+              - REQUIRED (`mpwRequired` true): shown immediately
                 after SSO sign-in for users without a password. No Cancel
                 button — only "Sign Out" as an escape. This enforces the
                 master-password-at-signup security model.
-              - OPTIONAL (`setPasswordRequired` false): shown when a user
+              - OPTIONAL (`mpwRequired` false): shown when a user
                 with an existing password opens this flow voluntarily
                 (e.g. to rotate password from settings). Normal Cancel
                 button. Not currently triggered anywhere in the UI but the
@@ -2347,59 +2347,59 @@ export default function LoginScreen() {
               See the state-declaration comment near the top of the file
               for the threat-model explanation. */}
           <Modal
-            visible={setPasswordVisible}
+            visible={mpwVisible}
             transparent
             animationType="fade"
             onRequestClose={
-              setPasswordRequired ? () => {} : closeSetPassword
+              mpwRequired ? () => {} : closeSetPassword
             }
           >
             <View style={styles.pinLockBackdrop}>
               <View style={styles.pinLockCard}>
                 <Text style={styles.pinLockTitle}>
-                  {setPasswordRequired
+                  {mpwRequired
                     ? 'Secure Your Account'
                     : 'Set a Password'}
                 </Text>
                 <Text style={styles.pinLockSubtext}>
-                  {setPasswordRequired
+                  {mpwRequired
                     ? "You signed in with Google or Apple. Before you start using Downtown Vibes, set a master password to protect your account.\n\nYour password is required for:\n  \u2022 Deleting your account\n  \u2022 Deleting a business\n  \u2022 Upgrading or managing your subscription\n  \u2022 Locking your business pins\n\nYou'll still sign in with Google or Apple normally — this password is ONLY used for account-level actions. If you ever share your Google or Apple sign-in with an employee, they won't be able to perform these actions without this password."
                     : "Set a password for your account. You'll use it for delete, subscription changes, and other account-level actions. You'll still sign in with Google or Apple normally."}
                 </Text>
                 <TextInput
                   style={styles.input}
-                  value={setPasswordValue}
-                  onChangeText={setSetPasswordValue}
+                  value={mpwValue}
+                  onChangeText={setMpwValue}
                   placeholder="New password (8+ characters)"
                   placeholderTextColor="#9CA3AF"
                   secureTextEntry
                   autoCapitalize="none"
                   autoCorrect={false}
-                  editable={!setPasswordSaving}
+                  editable={!mpwSaving}
                 />
                 <TextInput
                   style={styles.input}
-                  value={setPasswordConfirm}
-                  onChangeText={setSetPasswordConfirm}
+                  value={mpwConfirm}
+                  onChangeText={setMpwConfirm}
                   placeholder="Confirm password"
                   placeholderTextColor="#9CA3AF"
                   secureTextEntry
                   autoCapitalize="none"
                   autoCorrect={false}
-                  editable={!setPasswordSaving}
+                  editable={!mpwSaving}
                 />
                 <View style={styles.pinLockBtnRow}>
                   <TouchableOpacity
                     style={[
                       styles.pinLockPrimaryBtn,
-                      setPasswordSaving && styles.btnDisabled,
+                      mpwSaving && styles.btnDisabled,
                     ]}
                     onPress={handleSetPassword}
-                    disabled={setPasswordSaving}
+                    disabled={mpwSaving}
                     accessibilityRole="button"
                     accessibilityLabel="Set password"
                   >
-                    {setPasswordSaving ? (
+                    {mpwSaving ? (
                       <ActivityIndicator color="#FFF" size="small" />
                     ) : (
                       <Text style={styles.pinLockPrimaryText}>
@@ -2411,20 +2411,20 @@ export default function LoginScreen() {
                   <TouchableOpacity
                     style={styles.pinLockCancelBtn}
                     onPress={
-                      setPasswordRequired
+                      mpwRequired
                         ? handleSetPasswordSignOut
                         : closeSetPassword
                     }
-                    disabled={setPasswordSaving}
+                    disabled={mpwSaving}
                     accessibilityRole="button"
                     accessibilityLabel={
-                      setPasswordRequired
+                      mpwRequired
                         ? 'Sign out'
                         : 'Cancel setting password'
                     }
                   >
                     <Text style={styles.pinLockCancelText}>
-                      {setPasswordRequired ? 'Sign Out' : 'Cancel'}
+                      {mpwRequired ? 'Sign Out' : 'Cancel'}
                     </Text>
                   </TouchableOpacity>
                 </View>
