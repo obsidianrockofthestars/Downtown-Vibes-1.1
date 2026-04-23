@@ -946,7 +946,22 @@ export default function LoginScreen() {
 
     setMpwSaving(true);
     try {
-      const { error } = await supabase.auth.updateUser({ password: pwd });
+      // IMPORTANT: we call the `set_master_password` RPC, NOT
+      // supabase.auth.updateUser({password}). The latter silently fails for
+      // SSO-only users — the call returns success with no error, but
+      // auth.users.encrypted_password remains NULL. Verified on this project
+      // 2026-04-23: SSO users who "successfully" set a password via the stock
+      // API still had NULL encrypted_password. Suspected cause is the
+      // secure_password_change feature interacting with missing prior hash.
+      //
+      // The RPC (migration `add_set_master_password_rpc`) runs as SECURITY
+      // DEFINER, writes encrypted_password via pgcrypto's crypt() in the
+      // same bcrypt format Supabase expects, and creates an email identity
+      // row. After it succeeds, signInWithPassword and
+      // `getUserIdentities().some(provider='email')` both work normally.
+      const { error } = await supabase.rpc('set_master_password', {
+        new_password: pwd,
+      });
       if (error) {
         Alert.alert('Could Not Set Password', error.message);
         return;
@@ -1665,6 +1680,93 @@ export default function LoginScreen() {
     }
   };
 
+  // ─── Master-password modal (shared across all signed-in renders) ─────
+  //
+  // Extracted into a single element here so every render branch that
+  // represents a signed-in user can include it via `{setPasswordModalElement}`.
+  // Previously, the Modal was nested inside the owner-dashboard render block
+  // only, which meant customers and owner-onboarding users never saw it.
+  //
+  // REQUIRED mode copy spells out WHY a master password matters — the
+  // employee-bypass threat model is the load-bearing reason.
+  const setPasswordModalElement = (
+    <Modal
+      visible={mpwVisible}
+      transparent
+      animationType="fade"
+      onRequestClose={mpwRequired ? () => {} : closeSetPassword}
+    >
+      <View style={styles.pinLockBackdrop}>
+        <View style={styles.pinLockCard}>
+          <Text style={styles.pinLockTitle}>
+            {mpwRequired ? 'Secure Your Account' : 'Set a Password'}
+          </Text>
+          <Text style={styles.pinLockSubtext}>
+            {mpwRequired
+              ? "You signed in with Google or Apple. Before you start using Downtown Vibes, set a master password to protect your account.\n\nYour password is required for:\n  \u2022 Deleting your account\n  \u2022 Deleting a business\n  \u2022 Upgrading or managing your subscription\n  \u2022 Locking your business pins\n\nYou'll still sign in with Google or Apple normally — this password is ONLY used for account-level actions. If you ever share your Google or Apple sign-in with an employee, they won't be able to perform these actions without this password."
+              : "Set a password for your account. You'll use it for delete, subscription changes, and other account-level actions. You'll still sign in with Google or Apple normally."}
+          </Text>
+          <TextInput
+            style={styles.input}
+            value={mpwValue}
+            onChangeText={setMpwValue}
+            placeholder="New password (8+ characters)"
+            placeholderTextColor="#9CA3AF"
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!mpwSaving}
+          />
+          <TextInput
+            style={styles.input}
+            value={mpwConfirm}
+            onChangeText={setMpwConfirm}
+            placeholder="Confirm password"
+            placeholderTextColor="#9CA3AF"
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!mpwSaving}
+          />
+          <View style={styles.pinLockBtnRow}>
+            <TouchableOpacity
+              style={[
+                styles.pinLockPrimaryBtn,
+                mpwSaving && styles.btnDisabled,
+              ]}
+              onPress={handleSetPassword}
+              disabled={mpwSaving}
+              accessibilityRole="button"
+              accessibilityLabel="Set password"
+            >
+              {mpwSaving ? (
+                <ActivityIndicator color="#FFF" size="small" />
+              ) : (
+                <Text style={styles.pinLockPrimaryText}>Set Password</Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.pinLockCancelBtn}
+              onPress={
+                mpwRequired ? handleSetPasswordSignOut : closeSetPassword
+              }
+              disabled={mpwSaving}
+              accessibilityRole="button"
+              accessibilityLabel={
+                mpwRequired ? 'Sign out' : 'Cancel setting password'
+              }
+            >
+              <Text style={styles.pinLockCancelText}>
+                {mpwRequired ? 'Sign Out' : 'Cancel'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
   // ─── Loading spinner ─────────────────────────────────────────
   if (loading) {
     return (
@@ -1677,13 +1779,16 @@ export default function LoginScreen() {
   // ─── Customer redirect ────────────────────────────────────────
   if (user && role === 'customer') {
     return (
-      <View style={styles.center}>
-        <Text style={styles.customerRedirectEmoji}>✨</Text>
-        <Text style={styles.customerRedirectTitle}>You're signed in!</Text>
-        <Text style={styles.customerRedirectSub}>
-          Head to the Account tab to manage your account and Vibe Checks.
-        </Text>
-      </View>
+      <>
+        <View style={styles.center}>
+          <Text style={styles.customerRedirectEmoji}>✨</Text>
+          <Text style={styles.customerRedirectTitle}>You're signed in!</Text>
+          <Text style={styles.customerRedirectSub}>
+            Head to the Account tab to manage your account and Vibe Checks.
+          </Text>
+        </View>
+        {setPasswordModalElement}
+      </>
     );
   }
 
@@ -2334,103 +2439,12 @@ export default function LoginScreen() {
             </View>
           </Modal>
 
-          {/* Set-account-password modal. Two modes:
-              - REQUIRED (`mpwRequired` true): shown immediately
-                after SSO sign-in for users without a password. No Cancel
-                button — only "Sign Out" as an escape. This enforces the
-                master-password-at-signup security model.
-              - OPTIONAL (`mpwRequired` false): shown when a user
-                with an existing password opens this flow voluntarily
-                (e.g. to rotate password from settings). Normal Cancel
-                button. Not currently triggered anywhere in the UI but the
-                code path is ready for a future Account → Change Password.
-              See the state-declaration comment near the top of the file
-              for the threat-model explanation. */}
-          <Modal
-            visible={mpwVisible}
-            transparent
-            animationType="fade"
-            onRequestClose={
-              mpwRequired ? () => {} : closeSetPassword
-            }
-          >
-            <View style={styles.pinLockBackdrop}>
-              <View style={styles.pinLockCard}>
-                <Text style={styles.pinLockTitle}>
-                  {mpwRequired
-                    ? 'Secure Your Account'
-                    : 'Set a Password'}
-                </Text>
-                <Text style={styles.pinLockSubtext}>
-                  {mpwRequired
-                    ? "You signed in with Google or Apple. Before you start using Downtown Vibes, set a master password to protect your account.\n\nYour password is required for:\n  \u2022 Deleting your account\n  \u2022 Deleting a business\n  \u2022 Upgrading or managing your subscription\n  \u2022 Locking your business pins\n\nYou'll still sign in with Google or Apple normally — this password is ONLY used for account-level actions. If you ever share your Google or Apple sign-in with an employee, they won't be able to perform these actions without this password."
-                    : "Set a password for your account. You'll use it for delete, subscription changes, and other account-level actions. You'll still sign in with Google or Apple normally."}
-                </Text>
-                <TextInput
-                  style={styles.input}
-                  value={mpwValue}
-                  onChangeText={setMpwValue}
-                  placeholder="New password (8+ characters)"
-                  placeholderTextColor="#9CA3AF"
-                  secureTextEntry
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  editable={!mpwSaving}
-                />
-                <TextInput
-                  style={styles.input}
-                  value={mpwConfirm}
-                  onChangeText={setMpwConfirm}
-                  placeholder="Confirm password"
-                  placeholderTextColor="#9CA3AF"
-                  secureTextEntry
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  editable={!mpwSaving}
-                />
-                <View style={styles.pinLockBtnRow}>
-                  <TouchableOpacity
-                    style={[
-                      styles.pinLockPrimaryBtn,
-                      mpwSaving && styles.btnDisabled,
-                    ]}
-                    onPress={handleSetPassword}
-                    disabled={mpwSaving}
-                    accessibilityRole="button"
-                    accessibilityLabel="Set password"
-                  >
-                    {mpwSaving ? (
-                      <ActivityIndicator color="#FFF" size="small" />
-                    ) : (
-                      <Text style={styles.pinLockPrimaryText}>
-                        Set Password
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.pinLockCancelBtn}
-                    onPress={
-                      mpwRequired
-                        ? handleSetPasswordSignOut
-                        : closeSetPassword
-                    }
-                    disabled={mpwSaving}
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      mpwRequired
-                        ? 'Sign out'
-                        : 'Cancel setting password'
-                    }
-                  >
-                    <Text style={styles.pinLockCancelText}>
-                      {mpwRequired ? 'Sign Out' : 'Cancel'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
-          </Modal>
+          {/* Master-password modal — defined as a shared element earlier in
+              the component. Included here in the owner-dashboard render AND
+              in every other signed-in render branch (customer, onboarding,
+              bizLoading) so the modal appears regardless of which screen
+              state the user is in at SSO-signup time. */}
+          {setPasswordModalElement}
 
           {/* Owner: Vibe Checks & Favorites modal */}
           <Modal
@@ -2491,6 +2505,7 @@ export default function LoginScreen() {
   // ─── Logged-in: Owner Onboarding ──────────────────────────────
   if (user && needsOnboarding) {
     return (
+      <>
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -2697,15 +2712,20 @@ export default function LoginScreen() {
           />
         </ScrollView>
       </KeyboardAvoidingView>
+      {setPasswordModalElement}
+      </>
     );
   }
 
   // ─── Logged-in: Loading business data ─────────────────────────
   if (user && bizLoading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color="#6C3AED" />
-      </View>
+      <>
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color="#6C3AED" />
+        </View>
+        {setPasswordModalElement}
+      </>
     );
   }
 
