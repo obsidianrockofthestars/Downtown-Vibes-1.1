@@ -32,3 +32,37 @@ export interface VibeCheck {
 }
 
 export type UserRole = 'owner' | 'customer';
+
+// Third-party SSO providers we support. Keep this list in sync with the
+// provider-enabled list in the Supabase dashboard (Authentication → Providers)
+// and the client-side Apple/Google/Facebook SDKs in Tracks 2.3/2.4/2.7.
+//
+// Note: `linkIdentity`/`unlinkIdentity` in `AuthContext` accept this union so
+// SSO screens can pass provider names directly without string-literal drift.
+export type SSOProvider = 'apple' | 'google' | 'facebook';
+
+// Detect the Supabase auto-link collision. Happens when a user signs in with
+// an OAuth provider whose email matches an existing account that has NOT been
+// email-verified — Supabase refuses to auto-link (prevents pre-account
+// takeover) and returns an error. When this fires, the client should prompt
+// the user to sign in with their existing password first, then call
+// `linkIdentity(provider)` to attach the OAuth identity to the confirmed
+// session.
+//
+// Source: https://supabase.com/docs/guides/auth/auth-identity-linking
+export function isAutoLinkCollisionError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const err = error as { message?: unknown; status?: unknown; code?: unknown };
+  const msg = typeof err.message === 'string' ? err.message.toLowerCase() : '';
+  const code = typeof err.code === 'string' ? err.code.toLowerCase() : '';
+  // Supabase surfaces this as a 422 / 400 with a message along the lines of
+  // "user already registered" or "identity is already linked to another user".
+  return (
+    msg.includes('already registered') ||
+    msg.includes('already linked to another user') ||
+    msg.includes('identity is already linked') ||
+    msg.includes('email address is already in use') ||
+    code === 'identity_already_exists' ||
+    code === 'email_exists'
+  );
+}
