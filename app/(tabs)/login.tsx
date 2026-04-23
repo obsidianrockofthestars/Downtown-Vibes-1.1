@@ -163,26 +163,54 @@ export default function LoginScreen() {
   const [ownerGatePassword, setOwnerGatePassword] = useState('');
   const [ownerGateSaving, setOwnerGateSaving] = useState(false);
 
-  // SSO-user account-deletion confirmation modal state.
+  // Set-account-password modal state.
   //
   // Users who signed up via Apple or Google SSO don't have an account password
-  // that `handleDeleteAccount`'s owner-gate re-auth can verify against. To
-  // still meet Apple Guideline 5.1.1(v) (in-app account deletion) without
-  // regressing security for password users, we branch in `handleDeleteAccount`:
+  // that the owner-gate re-auth can verify against. This breaks ALL FOUR
+  // owner-gated destructive actions: delete_account, delete_business,
+  // open_paywall, manage_subscription.
   //
-  //   - User has an `email` identity → existing owner-gate password flow.
-  //   - SSO-only user → this typed-confirmation modal. User must type the
-  //     literal string "DELETE" into the input before the Delete button
-  //     enables. Industry-standard pattern for destructive actions on SSO
-  //     accounts (matches GitHub / Facebook / Twitter).
+  // Master-password pattern (Twitter / Instagram / Facebook precedent):
+  // `supabase.auth.updateUser({ password })` on an OAuth-created user
+  // natively creates an `email` identity alongside their SSO identity, so
+  // after setting, every password-based flow works identically.
   //
-  // `signInWithIdToken` re-auth via the linked SSO provider would be stricter
-  // but adds meaningful complexity and failure modes; typed confirmation is
-  // the minimum Apple accepts and is what we're shipping in 1.4.1. Re-auth
-  // via SSO is tracked as a 1.4.2 follow-up if we decide we want it later.
-  const [ssoDeleteVisible, setSsoDeleteVisible] = useState(false);
-  const [ssoDeleteText, setSsoDeleteText] = useState('');
-  const [ssoDeleteSaving, setSsoDeleteSaving] = useState(false);
+  // THREAT MODEL — why we require this at SIGN-IN, not at first destructive
+  // action:
+  //   Dylan (and many other business owners) may share Google/Apple sign-in
+  //   credentials with employees for legitimate reasons (e.g., the company
+  //   Gmail is shared). If we only prompted for password at the moment of
+  //   a destructive action, an unauthorized user would just set whatever
+  //   password they want in that moment, then use it to destroy the thing
+  //   they're gated on — the password gate would be bypassed completely.
+  //
+  //   Correct flow: owner signs in via SSO → IMMEDIATELY gets prompted to
+  //   set a master password, BEFORE they've done anything. Once set, the
+  //   owner can safely share SSO credentials with an employee; the employee
+  //   can sign in and use the app, but destructive actions are gated by
+  //   a password the employee never learned.
+  //
+  // The flow:
+  //   1. User signs in via SSO (Apple or Google).
+  //   2. On session establishment, a useEffect checks their identities.
+  //   3. If only SSO identities (no `email`) → this modal opens in
+  //      REQUIRED mode (can't dismiss except via sign-out).
+  //   4. User sets password → `updateUser({password})` → email identity
+  //      created → modal closes. They now have full destructive-action
+  //      access via the regular owner gate.
+  //   5. A user who somehow ends up signed in without a password (edge
+  //      cases like 1.4.2 users upgrading to 1.4.3) gets the same modal
+  //      on app launch.
+  //
+  // `setPasswordRequired` gates the Cancel button. In required mode, the
+  // only escape is the "Sign Out" button — dismissing without setting
+  // would leave the user in a logged-in state with no way to do owner
+  // actions, which defeats the point of SSO.
+  const [setPasswordVisible, setSetPasswordVisible] = useState(false);
+  const [setPasswordValue, setSetPasswordValue] = useState('');
+  const [setPasswordConfirm, setSetPasswordConfirm] = useState('');
+  const [setPasswordSaving, setSetPasswordSaving] = useState(false);
+  const [setPasswordRequired, setSetPasswordRequired] = useState(false);
 
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
@@ -267,6 +295,94 @@ export default function LoginScreen() {
     setPinTier((b.account_tier as 'single' | 'dual') ?? 'single');
     setIsEditingDesc(false);
   }, [activeBusiness?.id]);
+
+  // Probe whether the current user has a password (i.e. an `email` identity).
+  // Used by the master-password useEffect below and by `requestOwnerGate`
+  // later to branch on SSO-only vs password users.
+  //
+  // Returns:
+  //   - `true` if user has an email identity (password exists).
+  //   - `false` if SSO-only (no email identity).
+  //   - `null` if we couldn't determine (both attempts errored).
+  //
+  // Retries once with 500ms delay to handle transient Supabase blips — this
+  // specifically addresses the 1.4.2 bug where getUserIdentities
+  // intermittently errored for SSO users and the code fell open to the
+  // password gate, which they couldn't pass.
+  //
+  // Declared early (before the useEffect that uses it) so the deps-array
+  // reference on that useEffect is valid at render time — a later
+  // declaration would hit the Temporal Dead Zone and crash on mount.
+  const checkUserHasPassword = useCallback(async (): Promise<
+    boolean | null
+  > => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { data, error } = await supabase.auth.getUserIdentities();
+        if (!error) {
+          return (data?.identities ?? []).some(
+            (i) => i.provider === 'email'
+          );
+        }
+        console.warn(
+          `checkUserHasPassword attempt ${attempt + 1} errored:`,
+          error
+        );
+      } catch (err) {
+        console.warn(
+          `checkUserHasPassword attempt ${attempt + 1} threw:`,
+          err
+        );
+      }
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    return null;
+  }, []);
+
+  // Master-password enforcement for SSO-only users.
+  //
+  // Runs whenever a user session becomes non-null (fresh sign-in OR app
+  // launch with existing session). Checks if the user has an `email`
+  // identity (i.e., a password). If not, opens the set-password modal in
+  // REQUIRED mode — the only escape is setting a password or signing out.
+  //
+  // This is the security-critical piece Dylan called out: password MUST
+  // be established at sign-in time, not at time-of-destruction. Otherwise
+  // an unauthorized user with shared SSO creds could set a fresh password
+  // in the moment and immediately use it to destroy things — the password
+  // gate would be self-defeating.
+  //
+  // Also handles the migration case: users who signed up in 1.4.2 without
+  // a password will get prompted on their first 1.4.3 app launch.
+  //
+  // Skips check if the modal is already open (prevents re-triggering while
+  // the user is mid-setup) and if the user is still loading (avoids a
+  // double-check during boot).
+  useEffect(() => {
+    if (!user || loading) return;
+    if (setPasswordVisible) return;
+    let cancelled = false;
+    (async () => {
+      const hasPwd = await checkUserHasPassword();
+      if (cancelled) return;
+      if (hasPwd === false) {
+        // SSO-only user with no master password. Force set-password flow.
+        setSetPasswordValue('');
+        setSetPasswordConfirm('');
+        setSetPasswordRequired(true);
+        setSetPasswordVisible(true);
+      }
+      // hasPwd === true → user has password, no action needed.
+      // hasPwd === null → unknown state (network issue); don't force the
+      //   modal on a transient failure. If they try a destructive action,
+      //   `requestOwnerGate` handles the fallback.
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, loading, setPasswordVisible, checkUserHasPassword]);
 
   const handleSignIn = async () => {
     if (!email || !password) {
@@ -792,98 +908,147 @@ export default function LoginScreen() {
   // account with one tap. The gate's modal surfaces the Apple-subscription
   // caveat as its subtitle copy, and requires password re-auth before the
   // delete_account RPC fires (see handleConfirmOwnerGate below).
-  const handleDeleteAccount = useCallback(async () => {
-    if (!user || deletingAccount || ownerGateSaving || ssoDeleteSaving) return;
+  const handleDeleteAccount = useCallback(() => {
+    if (!user || deletingAccount || ownerGateSaving || setPasswordSaving) return;
+    // All password-gate routing lives inside `requestOwnerGate` below.
+    // SSO-only users will transparently get the set-password modal first.
+    requestOwnerGate({ kind: 'delete_account' });
+  }, [user, deletingAccount, ownerGateSaving, setPasswordSaving]);
 
-    // Branch on the user's linked identity providers. Password-gate flow
-    // only works if an `email` identity exists (which means the user set a
-    // password at signup). SSO-only users (Apple or Google) have no password
-    // to verify against, so they go through the typed-confirmation modal.
-    try {
-      const { data, error } = await supabase.auth.getUserIdentities();
-      if (error) {
-        // Fail open: if we can't determine identities, fall back to the
-        // password gate. If the user is actually SSO-only, they'll hit an
-        // auth error on password verify and learn to contact support. This
-        // is safer than silently bypassing re-auth for a password user.
-        console.warn('getUserIdentities failed in handleDeleteAccount:', error);
-        setOwnerGateAction({ kind: 'delete_account' });
-        setOwnerGatePassword('');
-        return;
-      }
-      const identities = data?.identities ?? [];
-      const hasPassword = identities.some((i) => i.provider === 'email');
+  // Set the account password via `supabase.auth.updateUser({ password })`.
+  // Called from the set-password modal. On OAuth-created users, this call
+  // natively creates an `email` identity alongside their existing SSO
+  // identity. After it succeeds, every owner-gated action works identically
+  // as for an email/password user.
+  //
+  // NOT chained to any destructive action. Setting the password at signup
+  // (not at time-of-destruction) is the whole security point — see the
+  // state-declaration comment for threat-model context.
+  const handleSetPassword = useCallback(async () => {
+    if (setPasswordSaving) return;
+    const pwd = setPasswordValue;
+    const confirm = setPasswordConfirm;
 
-      if (hasPassword) {
-        // Password user (possibly also SSO-linked). Use the existing
-        // re-auth flow — more security-theater than Apple requires, but we
-        // paid that code cost in 21e and kept it.
-        setOwnerGateAction({ kind: 'delete_account' });
-        setOwnerGatePassword('');
-      } else {
-        // SSO-only user. Route to typed confirmation.
-        setSsoDeleteText('');
-        setSsoDeleteVisible(true);
-      }
-    } catch (err: any) {
-      // Network / unexpected throw — same fallback as the error branch.
-      console.warn('getUserIdentities threw in handleDeleteAccount:', err);
-      setOwnerGateAction({ kind: 'delete_account' });
-      setOwnerGatePassword('');
-    }
-  }, [user, deletingAccount, ownerGateSaving, ssoDeleteSaving]);
-
-  // Confirm deletion for SSO-only users who typed "DELETE" in the
-  // confirmation modal. No password re-auth; the typed confirmation is the
-  // gate. Bypasses signInWithPassword entirely — that's the point, since
-  // there's no password to verify against. The Supabase session itself is
-  // still the proof of identity (can't call delete_account unauthenticated).
-  const handleConfirmSsoDelete = useCallback(async () => {
-    if (!user || ssoDeleteSaving) return;
-    if (ssoDeleteText.trim() !== 'DELETE') {
+    if (pwd.length < 8) {
       Alert.alert(
-        'Type DELETE to Confirm',
-        'Please type DELETE (in all caps) exactly to confirm account deletion.'
+        'Password Too Short',
+        'Please use at least 8 characters.'
       );
       return;
     }
-    setSsoDeleteSaving(true);
+    if (pwd !== confirm) {
+      Alert.alert(
+        "Passwords Don't Match",
+        'Please type the same password in both fields.'
+      );
+      return;
+    }
+
+    setSetPasswordSaving(true);
     try {
-      setDeletingAccount(true);
-      const { error: deleteError } = await supabase.rpc('delete_account');
-      if (deleteError) {
-        Alert.alert('Error', deleteError.message);
+      const { error } = await supabase.auth.updateUser({ password: pwd });
+      if (error) {
+        Alert.alert('Could Not Set Password', error.message);
         return;
       }
-      // Tear down the modal before signOut unmounts this screen.
-      setSsoDeleteVisible(false);
-      setSsoDeleteText('');
-      await signOut();
+      // Success — tear down modal, confirm to user.
+      setSetPasswordVisible(false);
+      setSetPasswordValue('');
+      setSetPasswordConfirm('');
+      setSetPasswordRequired(false);
+      Alert.alert(
+        'Password Set',
+        'Your master password is now protecting your account. You can still sign in with Google or Apple normally — this password is only used for account actions like delete, subscription changes, and locking your business pins.'
+      );
     } catch (err: any) {
-      console.warn('SSO delete error:', err);
       Alert.alert(
         'Error',
-        err?.message ?? 'Could not delete your account. Please try again.'
+        err?.message ?? 'Could not set password. Please try again.'
       );
     } finally {
-      setDeletingAccount(false);
-      setSsoDeleteSaving(false);
+      setSetPasswordSaving(false);
     }
-  }, [user, ssoDeleteSaving, ssoDeleteText, signOut]);
+  }, [setPasswordSaving, setPasswordValue, setPasswordConfirm]);
 
-  const closeSsoDelete = useCallback(() => {
-    if (ssoDeleteSaving) return;
-    setSsoDeleteVisible(false);
-    setSsoDeleteText('');
-  }, [ssoDeleteSaving]);
+  // Dismiss the set-password modal. In REQUIRED mode (post-signup for SSO
+  // users), there is no user-initiated dismiss — Cancel is replaced with
+  // Sign Out in the modal UI. This function only runs for the optional
+  // dismiss path (e.g. user opened modal from Account settings to change
+  // their password voluntarily).
+  const closeSetPassword = useCallback(() => {
+    if (setPasswordSaving) return;
+    if (setPasswordRequired) return; // no user-initiated dismiss in required mode
+    setSetPasswordVisible(false);
+    setSetPasswordValue('');
+    setSetPasswordConfirm('');
+  }, [setPasswordSaving, setPasswordRequired]);
+
+  // Sign out from the set-password modal's required-mode escape path. A user
+  // who signed in via SSO but doesn't want to set a master password has
+  // exactly this one option — can't use the app without either setting a
+  // password or signing out.
+  const handleSetPasswordSignOut = useCallback(async () => {
+    if (setPasswordSaving) return;
+    setSetPasswordVisible(false);
+    setSetPasswordValue('');
+    setSetPasswordConfirm('');
+    setSetPasswordRequired(false);
+    await signOut();
+  }, [setPasswordSaving, signOut]);
 
   // Open the owner gate modal for a given action. Caller supplies the
   // discriminated action; the confirm handler below dispatches on `kind`
   // after a successful re-auth.
-  const requestOwnerGate = useCallback((action: OwnerGateAction) => {
-    setOwnerGateAction(action);
-    setOwnerGatePassword('');
-  }, []);
+  //
+  // 1.4.3+: defensive check. A user who reaches this function SHOULD always
+  // have a password at this point, because the app-boot useEffect below
+  // forces SSO-only users through the set-password modal BEFORE they can
+  // access destructive actions. If we reach here without a password, it's
+  // an edge case (race condition, failed updateUser, mid-session identity
+  // state flap) — we abort the action and re-trigger the set-password
+  // prompt in required mode. Critically: we do NOT offer to set the
+  // password in-flow here, because doing so would let an unauthorized
+  // user (e.g. an employee using shared Google creds) set a fresh
+  // password and immediately use it to perform the destructive action.
+  // That bypass was the reason the 1.4.3 first-cut design was scrapped.
+  //
+  // If `checkUserHasPassword` errors both attempts (unknown state), we fall
+  // OPEN to the password gate — a transient network issue shouldn't lock
+  // a legitimate password user out of their own account.
+  const requestOwnerGate = useCallback(
+    async (action: OwnerGateAction) => {
+      const hasPwd = await checkUserHasPassword();
+      if (hasPwd === false) {
+        // SSO-only user without a master password. This should have been
+        // caught at sign-in by the useEffect below; if we got here, something
+        // slipped through. Abort the action and force set-password flow in
+        // required mode. User has to set a password AND then re-tap the
+        // destructive action they originally wanted — no auto-resume.
+        Alert.alert(
+          'Master Password Required',
+          'Account actions require a master password. You\'ll be asked to set one now, and then you can try this action again.',
+          [
+            {
+              text: 'Set Password',
+              onPress: () => {
+                setSetPasswordValue('');
+                setSetPasswordConfirm('');
+                setSetPasswordRequired(true);
+                setSetPasswordVisible(true);
+              },
+            },
+          ]
+        );
+        return;
+      }
+      // `hasPwd === true` OR `hasPwd === null` (unknown). Both route to
+      // the owner gate — password users succeed, unknown-state gets a
+      // retry opportunity.
+      setOwnerGateAction(action);
+      setOwnerGatePassword('');
+    },
+    [checkUserHasPassword]
+  );
 
   const closeOwnerGate = useCallback(() => {
     if (ownerGateSaving) return;
@@ -2169,68 +2334,98 @@ export default function LoginScreen() {
             </View>
           </Modal>
 
-          {/* SSO-user account deletion — typed-confirmation modal.
-              Shown ONLY for users whose identity providers don't include
-              `email` (SSO-only, no password to verify against). Password
-              users continue through the owner gate above. See
-              `handleDeleteAccount` comments for threat-model context. */}
+          {/* Set-account-password modal. Two modes:
+              - REQUIRED (`setPasswordRequired` true): shown immediately
+                after SSO sign-in for users without a password. No Cancel
+                button — only "Sign Out" as an escape. This enforces the
+                master-password-at-signup security model.
+              - OPTIONAL (`setPasswordRequired` false): shown when a user
+                with an existing password opens this flow voluntarily
+                (e.g. to rotate password from settings). Normal Cancel
+                button. Not currently triggered anywhere in the UI but the
+                code path is ready for a future Account → Change Password.
+              See the state-declaration comment near the top of the file
+              for the threat-model explanation. */}
           <Modal
-            visible={ssoDeleteVisible}
+            visible={setPasswordVisible}
             transparent
             animationType="fade"
-            onRequestClose={closeSsoDelete}
+            onRequestClose={
+              setPasswordRequired ? () => {} : closeSetPassword
+            }
           >
             <View style={styles.pinLockBackdrop}>
               <View style={styles.pinLockCard}>
-                <Text style={styles.pinLockTitle}>Delete Account</Text>
+                <Text style={styles.pinLockTitle}>
+                  {setPasswordRequired
+                    ? 'Secure Your Account'
+                    : 'Set a Password'}
+                </Text>
                 <Text style={styles.pinLockSubtext}>
-                  This will permanently delete your account, all your
-                  businesses, and all your vibe checks. This will NOT cancel
-                  your active App Store or Google Play subscription — you
-                  must do that in your device's subscription settings. This
-                  cannot be undone.{'\n\n'}Type <Text style={{ fontWeight: '800' }}>DELETE</Text> below to confirm.
+                  {setPasswordRequired
+                    ? "You signed in with Google or Apple. Before you start using Downtown Vibes, set a master password to protect your account.\n\nYour password is required for:\n  \u2022 Deleting your account\n  \u2022 Deleting a business\n  \u2022 Upgrading or managing your subscription\n  \u2022 Locking your business pins\n\nYou'll still sign in with Google or Apple normally — this password is ONLY used for account-level actions. If you ever share your Google or Apple sign-in with an employee, they won't be able to perform these actions without this password."
+                    : "Set a password for your account. You'll use it for delete, subscription changes, and other account-level actions. You'll still sign in with Google or Apple normally."}
                 </Text>
                 <TextInput
                   style={styles.input}
-                  value={ssoDeleteText}
-                  onChangeText={setSsoDeleteText}
-                  placeholder="Type DELETE to confirm"
+                  value={setPasswordValue}
+                  onChangeText={setSetPasswordValue}
+                  placeholder="New password (8+ characters)"
                   placeholderTextColor="#9CA3AF"
-                  autoCapitalize="characters"
+                  secureTextEntry
+                  autoCapitalize="none"
                   autoCorrect={false}
-                  editable={!ssoDeleteSaving}
+                  editable={!setPasswordSaving}
+                />
+                <TextInput
+                  style={styles.input}
+                  value={setPasswordConfirm}
+                  onChangeText={setSetPasswordConfirm}
+                  placeholder="Confirm password"
+                  placeholderTextColor="#9CA3AF"
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  editable={!setPasswordSaving}
                 />
                 <View style={styles.pinLockBtnRow}>
                   <TouchableOpacity
                     style={[
-                      styles.deleteBizConfirmBtn,
-                      (ssoDeleteText.trim() !== 'DELETE' || ssoDeleteSaving) &&
-                        styles.btnDisabled,
+                      styles.pinLockPrimaryBtn,
+                      setPasswordSaving && styles.btnDisabled,
                     ]}
-                    onPress={handleConfirmSsoDelete}
-                    disabled={
-                      ssoDeleteText.trim() !== 'DELETE' || ssoDeleteSaving
-                    }
+                    onPress={handleSetPassword}
+                    disabled={setPasswordSaving}
                     accessibilityRole="button"
-                    accessibilityLabel="Delete account"
+                    accessibilityLabel="Set password"
                   >
-                    {ssoDeleteSaving ? (
+                    {setPasswordSaving ? (
                       <ActivityIndicator color="#FFF" size="small" />
                     ) : (
-                      <Text style={styles.deleteBizConfirmText}>
-                        Delete Account
+                      <Text style={styles.pinLockPrimaryText}>
+                        Set Password
                       </Text>
                     )}
                   </TouchableOpacity>
 
                   <TouchableOpacity
                     style={styles.pinLockCancelBtn}
-                    onPress={closeSsoDelete}
-                    disabled={ssoDeleteSaving}
+                    onPress={
+                      setPasswordRequired
+                        ? handleSetPasswordSignOut
+                        : closeSetPassword
+                    }
+                    disabled={setPasswordSaving}
                     accessibilityRole="button"
-                    accessibilityLabel="Cancel account deletion"
+                    accessibilityLabel={
+                      setPasswordRequired
+                        ? 'Sign out'
+                        : 'Cancel setting password'
+                    }
                   >
-                    <Text style={styles.pinLockCancelText}>Cancel</Text>
+                    <Text style={styles.pinLockCancelText}>
+                      {setPasswordRequired ? 'Sign Out' : 'Cancel'}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </View>
