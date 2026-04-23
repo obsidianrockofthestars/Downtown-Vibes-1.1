@@ -2,7 +2,7 @@ module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
-    version: '1.4.1',
+    version: '1.4.2',
     orientation: 'portrait',
     icon: './assets/images/icon.png',
     scheme: 'vibeathon',
@@ -15,7 +15,7 @@ module.exports = {
     ios: {
       supportsTablet: true,
       bundleIdentifier: 'com.potionsandfamiliars.downtownvibes',
-      buildNumber: '13',
+      buildNumber: '14',
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
         NSLocationWhenInUseUsageDescription:
@@ -26,7 +26,7 @@ module.exports = {
       },
     },
     android: {
-      versionCode: 13,
+      versionCode: 14,
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
         foregroundImage: './assets/images/icon.png',
@@ -48,6 +48,7 @@ module.exports = {
       './plugins/withGradleMavenMirror',
       'expo-router',
       'expo-secure-store',
+      'expo-web-browser',
       // Sign in with Apple (iOS only). This plugin adds the
       // `com.apple.developer.applesignin` entitlement during prebuild; it's
       // required by Apple's Guideline 4.8 any time the app also offers

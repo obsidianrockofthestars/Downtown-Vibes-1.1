@@ -163,6 +163,27 @@ export default function LoginScreen() {
   const [ownerGatePassword, setOwnerGatePassword] = useState('');
   const [ownerGateSaving, setOwnerGateSaving] = useState(false);
 
+  // SSO-user account-deletion confirmation modal state.
+  //
+  // Users who signed up via Apple or Google SSO don't have an account password
+  // that `handleDeleteAccount`'s owner-gate re-auth can verify against. To
+  // still meet Apple Guideline 5.1.1(v) (in-app account deletion) without
+  // regressing security for password users, we branch in `handleDeleteAccount`:
+  //
+  //   - User has an `email` identity → existing owner-gate password flow.
+  //   - SSO-only user → this typed-confirmation modal. User must type the
+  //     literal string "DELETE" into the input before the Delete button
+  //     enables. Industry-standard pattern for destructive actions on SSO
+  //     accounts (matches GitHub / Facebook / Twitter).
+  //
+  // `signInWithIdToken` re-auth via the linked SSO provider would be stricter
+  // but adds meaningful complexity and failure modes; typed confirmation is
+  // the minimum Apple accepts and is what we're shipping in 1.4.1. Re-auth
+  // via SSO is tracked as a 1.4.2 follow-up if we decide we want it later.
+  const [ssoDeleteVisible, setSsoDeleteVisible] = useState(false);
+  const [ssoDeleteText, setSsoDeleteText] = useState('');
+  const [ssoDeleteSaving, setSsoDeleteSaving] = useState(false);
+
   const fetchBusinessData = async (userId: string) => {
     setBizLoading(true);
     try {
@@ -771,12 +792,90 @@ export default function LoginScreen() {
   // account with one tap. The gate's modal surfaces the Apple-subscription
   // caveat as its subtitle copy, and requires password re-auth before the
   // delete_account RPC fires (see handleConfirmOwnerGate below).
-  const handleDeleteAccount = useCallback(() => {
-    if (!user || deletingAccount || ownerGateSaving) return;
-    // Route to the shared owner gate modal.
-    setOwnerGateAction({ kind: 'delete_account' });
-    setOwnerGatePassword('');
-  }, [user, deletingAccount, ownerGateSaving]);
+  const handleDeleteAccount = useCallback(async () => {
+    if (!user || deletingAccount || ownerGateSaving || ssoDeleteSaving) return;
+
+    // Branch on the user's linked identity providers. Password-gate flow
+    // only works if an `email` identity exists (which means the user set a
+    // password at signup). SSO-only users (Apple or Google) have no password
+    // to verify against, so they go through the typed-confirmation modal.
+    try {
+      const { data, error } = await supabase.auth.getUserIdentities();
+      if (error) {
+        // Fail open: if we can't determine identities, fall back to the
+        // password gate. If the user is actually SSO-only, they'll hit an
+        // auth error on password verify and learn to contact support. This
+        // is safer than silently bypassing re-auth for a password user.
+        console.warn('getUserIdentities failed in handleDeleteAccount:', error);
+        setOwnerGateAction({ kind: 'delete_account' });
+        setOwnerGatePassword('');
+        return;
+      }
+      const identities = data?.identities ?? [];
+      const hasPassword = identities.some((i) => i.provider === 'email');
+
+      if (hasPassword) {
+        // Password user (possibly also SSO-linked). Use the existing
+        // re-auth flow — more security-theater than Apple requires, but we
+        // paid that code cost in 21e and kept it.
+        setOwnerGateAction({ kind: 'delete_account' });
+        setOwnerGatePassword('');
+      } else {
+        // SSO-only user. Route to typed confirmation.
+        setSsoDeleteText('');
+        setSsoDeleteVisible(true);
+      }
+    } catch (err: any) {
+      // Network / unexpected throw — same fallback as the error branch.
+      console.warn('getUserIdentities threw in handleDeleteAccount:', err);
+      setOwnerGateAction({ kind: 'delete_account' });
+      setOwnerGatePassword('');
+    }
+  }, [user, deletingAccount, ownerGateSaving, ssoDeleteSaving]);
+
+  // Confirm deletion for SSO-only users who typed "DELETE" in the
+  // confirmation modal. No password re-auth; the typed confirmation is the
+  // gate. Bypasses signInWithPassword entirely — that's the point, since
+  // there's no password to verify against. The Supabase session itself is
+  // still the proof of identity (can't call delete_account unauthenticated).
+  const handleConfirmSsoDelete = useCallback(async () => {
+    if (!user || ssoDeleteSaving) return;
+    if (ssoDeleteText.trim() !== 'DELETE') {
+      Alert.alert(
+        'Type DELETE to Confirm',
+        'Please type DELETE (in all caps) exactly to confirm account deletion.'
+      );
+      return;
+    }
+    setSsoDeleteSaving(true);
+    try {
+      setDeletingAccount(true);
+      const { error: deleteError } = await supabase.rpc('delete_account');
+      if (deleteError) {
+        Alert.alert('Error', deleteError.message);
+        return;
+      }
+      // Tear down the modal before signOut unmounts this screen.
+      setSsoDeleteVisible(false);
+      setSsoDeleteText('');
+      await signOut();
+    } catch (err: any) {
+      console.warn('SSO delete error:', err);
+      Alert.alert(
+        'Error',
+        err?.message ?? 'Could not delete your account. Please try again.'
+      );
+    } finally {
+      setDeletingAccount(false);
+      setSsoDeleteSaving(false);
+    }
+  }, [user, ssoDeleteSaving, ssoDeleteText, signOut]);
+
+  const closeSsoDelete = useCallback(() => {
+    if (ssoDeleteSaving) return;
+    setSsoDeleteVisible(false);
+    setSsoDeleteText('');
+  }, [ssoDeleteSaving]);
 
   // Open the owner gate modal for a given action. Caller supplies the
   // discriminated action; the confirm handler below dispatches on `kind`
@@ -2066,6 +2165,74 @@ export default function LoginScreen() {
                     </>
                   );
                 })()}
+              </View>
+            </View>
+          </Modal>
+
+          {/* SSO-user account deletion — typed-confirmation modal.
+              Shown ONLY for users whose identity providers don't include
+              `email` (SSO-only, no password to verify against). Password
+              users continue through the owner gate above. See
+              `handleDeleteAccount` comments for threat-model context. */}
+          <Modal
+            visible={ssoDeleteVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={closeSsoDelete}
+          >
+            <View style={styles.pinLockBackdrop}>
+              <View style={styles.pinLockCard}>
+                <Text style={styles.pinLockTitle}>Delete Account</Text>
+                <Text style={styles.pinLockSubtext}>
+                  This will permanently delete your account, all your
+                  businesses, and all your vibe checks. This will NOT cancel
+                  your active App Store or Google Play subscription — you
+                  must do that in your device's subscription settings. This
+                  cannot be undone.{'\n\n'}Type <Text style={{ fontWeight: '800' }}>DELETE</Text> below to confirm.
+                </Text>
+                <TextInput
+                  style={styles.input}
+                  value={ssoDeleteText}
+                  onChangeText={setSsoDeleteText}
+                  placeholder="Type DELETE to confirm"
+                  placeholderTextColor="#9CA3AF"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  editable={!ssoDeleteSaving}
+                />
+                <View style={styles.pinLockBtnRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.deleteBizConfirmBtn,
+                      (ssoDeleteText.trim() !== 'DELETE' || ssoDeleteSaving) &&
+                        styles.btnDisabled,
+                    ]}
+                    onPress={handleConfirmSsoDelete}
+                    disabled={
+                      ssoDeleteText.trim() !== 'DELETE' || ssoDeleteSaving
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel="Delete account"
+                  >
+                    {ssoDeleteSaving ? (
+                      <ActivityIndicator color="#FFF" size="small" />
+                    ) : (
+                      <Text style={styles.deleteBizConfirmText}>
+                        Delete Account
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.pinLockCancelBtn}
+                    onPress={closeSsoDelete}
+                    disabled={ssoDeleteSaving}
+                    accessibilityRole="button"
+                    accessibilityLabel="Cancel account deletion"
+                  >
+                    <Text style={styles.pinLockCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
           </Modal>
