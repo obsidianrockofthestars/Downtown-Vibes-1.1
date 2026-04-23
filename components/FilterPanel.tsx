@@ -243,7 +243,7 @@ export function FilterPanel({
           <View pointerEvents="none" style={[StyleSheet.absoluteFillObject]}>
             <Image
               source={require('@/assets/images/watermark.png')}
-              style={{ width: '100%', height: '100%', opacity: 0.2, resizeMode: 'cover' }}
+              style={{ width: '100%', height: '100%', opacity: 0.05, resizeMode: 'cover' }}
             />
           </View>
           {CATEGORIES.map((cat) => {
