@@ -17,7 +17,51 @@ import {
 import * as Location from 'expo-location';
 import * as Crypto from 'expo-crypto';
 import * as AppleAuthentication from 'expo-apple-authentication';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import Purchases from 'react-native-purchases';
+
+// Lazy-loaded Google Sign-In module.
+//
+// Why: `@react-native-google-signin/google-signin` evaluates
+// `TurboModuleRegistry.getEnforcing('RNGoogleSignin')` at module-load time,
+// which throws in Expo Go (native module isn't in Expo Go's pre-built
+// binary). A top-level import would crash the whole app on boot. We defer
+// the require() until the user actually taps the Google button, and cache
+// the module + a one-shot configure() flag so subsequent taps are fast.
+//
+// In Expo Go: `loadGoogleSignIn()` throws a friendly error, caught by
+// `handleGoogleSignIn` which shows an alert telling the user Google sign-in
+// requires the production build. In EAS dev client / production: the
+// require() succeeds on first call, configure() runs once, and subsequent
+// calls return the cached module.
+let _googleMod: any = null;
+let _googleConfigured = false;
+async function loadGoogleSignIn(): Promise<{
+  GoogleSignin: any;
+  statusCodes: any;
+}> {
+  if (!_googleMod) {
+    // `require()` (vs static import) is the key — it lets us catch the
+    // native-module-not-bundled error at call time instead of boot time.
+    _googleMod = require('@react-native-google-signin/google-signin');
+  }
+  if (!_googleConfigured) {
+    _googleMod.GoogleSignin.configure({
+      webClientId:
+        '221850025715-6pj2i8868b4v91pep7s104mlokiqhqlo.apps.googleusercontent.com',
+      iosClientId:
+        '221850025715-ructeajgl0ud42jh6rr3le5634i7dr4i.apps.googleusercontent.com',
+      // No refresh token needed — we hand Google's ID token to Supabase
+      // and live off Supabase's refresh token thereafter.
+      offlineAccess: false,
+    });
+    _googleConfigured = true;
+  }
+  return {
+    GoogleSignin: _googleMod.GoogleSignin,
+    statusCodes: _googleMod.statusCodes,
+  };
+}
 import RevenueCatUI from 'react-native-purchases-ui';
 
 // Lazy-loaded to avoid crash in Expo Go where the native module isn't available.
@@ -400,6 +444,143 @@ export default function LoginScreen() {
       Alert.alert(
         'Sign In Failed',
         err?.message ?? 'Something went wrong with Apple sign-in. Try again.'
+      );
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    // Sign in with Google — native SDK flow on iOS + Android.
+    //
+    // Mechanics:
+    //   - `hasPlayServices()` is Android-only; on iOS it's a harmless no-op
+    //     that always resolves true. On Android it prompts the user to
+    //     install/update Play Services if missing.
+    //   - `GoogleSignin.signIn()` opens Google's native account picker. On
+    //     success it returns an ID token signed for our *Web* client audience
+    //     (that's why AuthContext.configure() passes webClientId — Google's
+    //     ID token has a fixed audience regardless of platform).
+    //   - `supabase.auth.signInWithIdToken({provider: 'google', token})`
+    //     validates the JWT signature + audience against Google's JWKS. No
+    //     client secret needed on this side — Supabase verifies tokens
+    //     purely via the public key chain.
+    //   - Same auto-link behavior as Apple: Supabase auto-links to an
+    //     existing email-verified account; if the email is unverified we
+    //     surface the `isAutoLinkCollisionError` path and ask the user to
+    //     sign in with password first.
+    //
+    // Response shape note: @react-native-google-signin/google-signin changed
+    // its return type between major versions. v13+ returns
+    // `{type: 'success', data: {idToken, user: {...}}}`; pre-v13 returned
+    // `{idToken, user: {...}}` directly. Probe both shapes so a library
+    // bump doesn't silently break sign-in.
+    let GoogleSignin: any;
+    let googleStatusCodes: any;
+    try {
+      const mod = await loadGoogleSignIn();
+      GoogleSignin = mod.GoogleSignin;
+      googleStatusCodes = mod.statusCodes;
+    } catch (err: any) {
+      // The native module wasn't bundled — almost always means Expo Go.
+      // Email/password + Apple (iOS) still work; just tell the user to use
+      // a real build for Google.
+      Alert.alert(
+        'Google Sign-In Unavailable',
+        'Google Sign-In requires the production or TestFlight build of Downtown Vibes. Please use email and password, or Apple Sign-In on iOS.'
+      );
+      return;
+    }
+
+    try {
+      await GoogleSignin.hasPlayServices();
+
+      setAuthLoading(true);
+
+      const userInfo: any = await GoogleSignin.signIn();
+
+      // v13+ cancellation returns {type: 'cancelled'} instead of throwing.
+      if (userInfo?.type === 'cancelled') {
+        return;
+      }
+
+      const idToken: string | null =
+        userInfo?.data?.idToken ?? userInfo?.idToken ?? null;
+
+      if (!idToken) {
+        Alert.alert(
+          'Sign In Failed',
+          "Google didn't return an ID token. Try again, or use email and password."
+        );
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithIdToken({
+        provider: 'google',
+        token: idToken,
+      });
+
+      if (error) {
+        if (isAutoLinkCollisionError(error)) {
+          Alert.alert(
+            'Email Already in Use',
+            'That email is already tied to a Downtown Vibes account. Sign in with your password first, then add Google sign-in from Account settings.'
+          );
+        } else {
+          Alert.alert('Sign In Failed', error.message);
+        }
+        return;
+      }
+
+      // Seize first-sign-in metadata: Google user's display name + selected
+      // role. Same pattern as Apple — runs once per user since subsequent
+      // sign-ins won't overwrite existing `full_name` / `role` values.
+      const nextMetadata: Record<string, string> = {};
+      const existingRole = data.user?.user_metadata?.role as
+        | UserRole
+        | undefined;
+      if (!existingRole) {
+        nextMetadata.role = authRole ?? 'customer';
+      }
+      const googleName: string | undefined =
+        userInfo?.data?.user?.name ?? userInfo?.user?.name;
+      const existingName = data.user?.user_metadata?.full_name;
+      if (googleName && !existingName) {
+        nextMetadata.full_name = googleName;
+      }
+      if (Object.keys(nextMetadata).length > 0) {
+        const { error: updateErr } = await supabase.auth.updateUser({
+          data: nextMetadata,
+        });
+        if (updateErr) {
+          console.warn(
+            'Google sign-in metadata update failed:',
+            updateErr.message
+          );
+        }
+      }
+      // AuthContext.onAuthStateChange handles the UI transition.
+    } catch (err: any) {
+      // Google SDK status codes are the source of truth for known errors.
+      // Cancelled / in-progress / no-play-services all have silent or
+      // friendly handling; anything else bubbles up as a generic alert.
+      const code = err?.code;
+      if (
+        code === googleStatusCodes.SIGN_IN_CANCELLED ||
+        code === googleStatusCodes.IN_PROGRESS
+      ) {
+        return;
+      }
+      if (code === googleStatusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+        Alert.alert(
+          'Google Play Services Unavailable',
+          'Google Sign-In requires Google Play Services on this device. Please update Play Services, or sign in with email and password instead.'
+        );
+        return;
+      }
+      Alert.alert(
+        'Sign In Failed',
+        err?.message ?? 'Something went wrong with Google sign-in. Try again.'
       );
     } finally {
       setAuthLoading(false);
@@ -2404,28 +2585,52 @@ export default function LoginScreen() {
             `buttonType` based on mode so the label matches intent
             ("Sign in with Apple" vs "Sign up with Apple").
           */}
+          {/* SSO section — always show the divider since at least Google is
+              available on every platform. Apple is iOS-only per Guideline 4.8
+              (required when any third-party SSO is offered on iOS). Google
+              renders on both iOS and Android using the native SDK. */}
+          <View style={styles.ssoDivider}>
+            <View style={styles.ssoDividerLine} />
+            <Text style={styles.ssoDividerText}>or</Text>
+            <View style={styles.ssoDividerLine} />
+          </View>
+
           {Platform.OS === 'ios' && (
-            <>
-              <View style={styles.ssoDivider}>
-                <View style={styles.ssoDividerLine} />
-                <Text style={styles.ssoDividerText}>or</Text>
-                <View style={styles.ssoDividerLine} />
-              </View>
-              <AppleAuthentication.AppleAuthenticationButton
-                buttonType={
-                  isSignUp
-                    ? AppleAuthentication.AppleAuthenticationButtonType.SIGN_UP
-                    : AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN
-                }
-                buttonStyle={
-                  AppleAuthentication.AppleAuthenticationButtonStyle.BLACK
-                }
-                cornerRadius={12}
-                style={styles.appleBtn}
-                onPress={handleAppleSignIn}
-              />
-            </>
+            <AppleAuthentication.AppleAuthenticationButton
+              buttonType={
+                isSignUp
+                  ? AppleAuthentication.AppleAuthenticationButtonType.SIGN_UP
+                  : AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN
+              }
+              buttonStyle={
+                AppleAuthentication.AppleAuthenticationButtonStyle.BLACK
+              }
+              cornerRadius={12}
+              style={styles.appleBtn}
+              onPress={handleAppleSignIn}
+            />
           )}
+
+          {/* Google Sign-In button — iOS + Android. Google's brand guidelines
+              allow a custom-styled button as long as the logo + "Sign in with
+              Google" wording is preserved. Using Ionicons' `logo-google` for
+              the glyph keeps us off the asset-management treadmill (no PNG
+              to commit, no dark/light variants to maintain). */}
+          <TouchableOpacity
+            style={[styles.googleBtn, authLoading && styles.btnDisabled]}
+            onPress={handleGoogleSignIn}
+            disabled={authLoading}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel={
+              isSignUp ? 'Sign up with Google' : 'Sign in with Google'
+            }
+          >
+            <Ionicons name="logo-google" size={18} color="#FFFFFF" />
+            <Text style={styles.googleBtnText}>
+              {isSignUp ? 'Sign up with Google' : 'Sign in with Google'}
+            </Text>
+          </TouchableOpacity>
 
           {/* Privacy Policy line — only in signup mode. App Store review
               requires a visible Privacy Policy link on any screen that
@@ -2621,6 +2826,26 @@ const styles = StyleSheet.create({
   appleBtn: {
     width: '100%',
     height: 48,
+  },
+  googleBtn: {
+    // Custom-styled per Google brand guidelines: brand blue background,
+    // white logo + "Sign in with Google" wording, same height + corner
+    // radius as the Apple button directly above for visual parity.
+    width: '100%',
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: '#4285F4', // Google brand blue
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: 10,
+  },
+  googleBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
 
   /* Role chip — sits above the logo on the auth form. Shows which role the

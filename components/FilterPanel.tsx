@@ -89,10 +89,31 @@ export function FilterPanel({
           },
         ]}
       >
+        {/* Watermark — "Powered by Potions and Familiars" lockup sits quietly
+            behind all content at 0.05 opacity. Modal only; never on the map. */}
         <View pointerEvents="none" style={{ position: 'absolute', bottom: 0, right: -40, zIndex: 0 }}>
           <Image
             source={require('@/assets/images/watermark.png')}
             style={{ width: 250, height: 250, opacity: 0.05, resizeMode: 'contain' }}
+          />
+        </View>
+
+        {/* Downtown Vibes icon — bottom-left of the modal, ONLY when the menu
+            is open. Kept off the map per Dylan's UX note. Positioned above the
+            safe-area bottom inset so it clears the tab bar on notched devices. */}
+        <View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            bottom: Math.max(insets.bottom, 16) + 4,
+            left: 12,
+            zIndex: 1,
+          }}
+        >
+          <Image
+            source={require('@/assets/images/icon.png')}
+            style={{ width: 44, height: 44, borderRadius: 10 }}
+            resizeMode="contain"
           />
         </View>
         <View style={styles.sidePanelHeader}>
@@ -283,14 +304,14 @@ export function FilterPanel({
 const styles = StyleSheet.create({
   alertToggleBtn: {
     height: 46,
-    borderRadius: 14,
+    borderRadius: 999,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: '#E5E7EB',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 18,
     marginBottom: 8,
   },
   alertToggleBtnActive: {
@@ -308,13 +329,14 @@ const styles = StyleSheet.create({
   sortBtnRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    gap: 10,
     marginTop: 8,
     marginBottom: 10,
   },
   sortBtn: {
     flex: 1,
     height: 46,
-    borderRadius: 14,
+    borderRadius: 999,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: '#E5E7EB',
@@ -378,8 +400,8 @@ const styles = StyleSheet.create({
   closestViewBtn: {
     backgroundColor: '#6C3AED',
     paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 12,
+    paddingHorizontal: 18,
+    borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -390,9 +412,9 @@ const styles = StyleSheet.create({
   },
   clearSaleFilterBtn: {
     backgroundColor: '#DC2626',
-    borderRadius: 14,
+    borderRadius: 999,
     paddingVertical: 12,
-    paddingHorizontal: 14,
+    paddingHorizontal: 18,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 12,
@@ -417,7 +439,7 @@ const styles = StyleSheet.create({
   categoryBox: {
     width: '48%',
     height: 50,
-    borderRadius: 14,
+    borderRadius: 999,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: '#E5E7EB',
@@ -487,4 +509,4 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
     textTransform: 'uppercase',
   },
-});
+});

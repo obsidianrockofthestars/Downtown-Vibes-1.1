@@ -2,9 +2,9 @@ module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
-    version: '1.4.0',
+    version: '1.4.1',
     orientation: 'portrait',
-    icon: './assets/images/icon.png.png',
+    icon: './assets/images/icon.png',
     scheme: 'vibeathon',
     userInterfaceStyle: 'automatic',
     splash: {
@@ -15,7 +15,7 @@ module.exports = {
     ios: {
       supportsTablet: true,
       bundleIdentifier: 'com.potionsandfamiliars.downtownvibes',
-      buildNumber: '12',
+      buildNumber: '13',
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
         NSLocationWhenInUseUsageDescription:
@@ -26,10 +26,10 @@ module.exports = {
       },
     },
     android: {
-      versionCode: 12,
+      versionCode: 13,
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
-        foregroundImage: './assets/images/icon.png.png',
+        foregroundImage: './assets/images/icon.png',
       },
       config: {
         googleMaps: {
@@ -42,7 +42,7 @@ module.exports = {
     web: {
       bundler: 'metro',
       output: 'static',
-      favicon: './assets/images/icon.png.png',
+      favicon: './assets/images/icon.png',
     },
     plugins: [
       './plugins/withGradleMavenMirror',
@@ -54,6 +54,24 @@ module.exports = {
       // third-party SSO (Google/Facebook). Android build is unaffected —
       // expo-apple-authentication is a no-op outside iOS.
       'expo-apple-authentication',
+      // Sign in with Google — native SDK on both iOS and Android.
+      //   - iOS: Apple requires a URL scheme matching the REVERSED iOS client
+      //     ID so Google's consent sheet can callback into the app. The iOS
+      //     client ID in our Google Cloud project is
+      //     221850025715-ructeajgl0ud42jh6rr3le5634i7dr4i.apps.googleusercontent.com,
+      //     which reversed becomes the `iosUrlScheme` below.
+      //   - Android: no config here; the keystore's SHA-1 is bound to an
+      //     Android OAuth client in Google Cloud Console, and the native
+      //     SDK picks up the package name automatically.
+      //   - Web client ID (used by Supabase for token exchange) lives in
+      //     AuthContext.tsx's GoogleSignin.configure() call, not here.
+      [
+        '@react-native-google-signin/google-signin',
+        {
+          iosUrlScheme:
+            'com.googleusercontent.apps.221850025715-ructeajgl0ud42jh6rr3le5634i7dr4i',
+        },
+      ],
       [
         'expo-location',
         {
@@ -67,7 +85,7 @@ module.exports = {
       [
         'expo-notifications',
         {
-          icon: './assets/images/icon.png.png',
+          icon: './assets/images/icon.png',
           color: '#6C3AED',
         },
       ],

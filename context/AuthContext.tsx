@@ -4,6 +4,19 @@ import { supabase } from '@/lib/supabase';
 import { SSOProvider, UserRole } from '@/lib/types';
 import { createURL } from 'expo-linking';
 
+// Google Sign-In is intentionally NOT imported at the top of this file.
+//
+// The `@react-native-google-signin/google-signin` package evaluates a
+// TurboModuleRegistry.getEnforcing('RNGoogleSignin') call at module-load
+// time, which throws in Expo Go (where that native module isn't bundled).
+// Importing it here would crash the app on boot in Expo Go — including
+// screens that have nothing to do with Google.
+//
+// Instead, `loadGoogleSignIn()` in `app/(tabs)/login.tsx` lazy-requires the
+// module and configures it on first call. This lets the rest of the app
+// (map, filters, email auth, Apple SSO) run fine in Expo Go; only the
+// Google button is gated on a real build (EAS dev client or production).
+
 interface AuthContextType {
   session: Session | null;
   user: User | null;
@@ -133,6 +146,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
+    // Best-effort: revoke Google's cached credentials so the next Google
+    // sign-in prompts for account selection fresh. Lazily require the
+    // module so this doesn't crash in Expo Go (where the native module
+    // isn't bundled). Silent on any failure — signOut should never throw
+    // to the caller.
+    try {
+      const mod = require('@react-native-google-signin/google-signin');
+      await mod?.GoogleSignin?.signOut?.();
+    } catch {
+      /* expected in Expo Go; ignore elsewhere */
+    }
     await supabase.auth.signOut();
   };
 
