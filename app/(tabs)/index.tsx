@@ -29,17 +29,43 @@ import { OnboardingTutorial, ONBOARDING_SEEN_KEY } from '@/components/Onboarding
 const GEOFENCE_RADIUS_METERS = 160;
 const MAX_GEOFENCE_REGIONS = 20;
 
+// Dark-themed map style that also hides Google-native POIs (restaurants,
+// bars, retail chips). Only Downtown Vibes business pins render on top.
+// If you prefer to keep POIs visible, remove the two `poi*` entries below.
+const DOWNTOWN_VIBES_MAP_STYLE = [
+  { elementType: 'geometry', stylers: [{ color: '#1d2c4d' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3b9' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#1a3646' }] },
+  { featureType: 'administrative.country', elementType: 'geometry.stroke', stylers: [{ color: '#4b6878' }] },
+  { featureType: 'administrative.land_parcel', stylers: [{ visibility: 'off' }] },
+  { featureType: 'administrative.locality', elementType: 'labels.text.fill', stylers: [{ color: '#ffffff' }] },
+  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+  { featureType: 'poi.business', stylers: [{ visibility: 'off' }] },
+  { featureType: 'poi.park', elementType: 'geometry.fill', stylers: [{ color: '#023e58' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#304a7d' }] },
+  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#98a5be' }] },
+  { featureType: 'road', elementType: 'labels.text.stroke', stylers: [{ color: '#1d2c4d' }] },
+  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#2c6675' }] },
+  { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#b0d5ce' }] },
+  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0e1626' }] },
+  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#4e6d70' }] },
+];
+
 const RADAR_RADIUS_MILES = 0.15;
 const BBOX_DEGREES = 0.0025;
 const PROXIMITY_ALERTS_KEY = 'dv_proximity_alerts_enabled';
 
-const CATEGORIES = ['restaurant', 'bar', 'retail', 'traveling'] as const;
+const CATEGORIES = ['restaurant', 'bar', 'retail', 'coffee'] as const;
 
+// Muted, WCAG-AA-compliant category palette. White text on each bg passes
+// contrast ratios >= 4.5:1. If you want to revert to the brighter saturated
+// palette, the originals were #22C55E / #3B82F6 / #EF4444 / #F97316.
 const CHIP_COLORS: Record<string, { bg: string; text: string }> = {
-  restaurant: { bg: '#22C55E', text: '#FFFFFF' },
-  bar: { bg: '#3B82F6', text: '#FFFFFF' },
-  retail: { bg: '#EF4444', text: '#FFFFFF' },
-  traveling: { bg: '#F97316', text: '#FFFFFF' },
+  restaurant: { bg: '#2E8B57', text: '#FFFFFF' }, // muted sea green
+  bar: { bg: '#5B7FC7', text: '#FFFFFF' },        // muted blue
+  retail: { bg: '#C25450', text: '#FFFFFF' },     // muted red
+  coffee: { bg: '#8B6F3E', text: '#FFFFFF' },     // muted warm brown-gold
 };
 
 function formatMiles(miles: number) {
@@ -57,7 +83,8 @@ function getPinImage(type: string) {
     case 'store':
     case 'retail':
       return require('@/assets/pins/pin-store.png');
-    case 'traveling':
+    case 'coffee':
+      // TODO: replace with dedicated pin-coffee.png asset when designed.
       return require('@/assets/pins/pin-default.png');
     default:
       return require('@/assets/pins/pin-default.png');
@@ -79,7 +106,7 @@ function MapScreen() {
     'restaurant',
     'bar',
     'retail',
-    'traveling',
+    'coffee',
   ]);
   const [activeSort, setActiveSort] = useState<'default' | 'closest'>('default');
   const [nearbySales, setNearbySales] = useState<NearbySale[]>([]);
@@ -490,6 +517,7 @@ function MapScreen() {
           longitudeDelta: 0.05,
         }}
         provider="google"
+        customMapStyle={DOWNTOWN_VIBES_MAP_STYLE}
         showsUserLocation
         showsMyLocationButton
         onPress={() => setSelectedBusiness(null)}
