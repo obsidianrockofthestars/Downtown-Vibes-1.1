@@ -16,13 +16,6 @@ module.exports = {
       supportsTablet: true,
       bundleIdentifier: 'com.potionsandfamiliars.downtownvibes',
       buildNumber: '17',
-      // iOS Google Maps key — required by react-native-maps with provider="google"
-      // so Expo prebuild writes GMSServices.provideAPIKey() into AppDelegate.
-      // Without this, iOS map tiles silently fail and the map renders blank.
-      // Note: iOS takes flat googleMapsApiKey; Android takes nested googleMaps.apiKey.
-      config: {
-        googleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
-      },
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
         NSLocationWhenInUseUsageDescription:
@@ -37,11 +30,6 @@ module.exports = {
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
         foregroundImage: './assets/images/icon.png',
-      },
-      config: {
-        googleMaps: {
-          apiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
-        },
       },
       permissions: ['ACCESS_FINE_LOCATION', 'ACCESS_COARSE_LOCATION', 'ACCESS_BACKGROUND_LOCATION'],
       package: 'com.potionsandfamiliars.downtownvibes',
@@ -78,6 +66,20 @@ module.exports = {
         {
           iosUrlScheme:
             'com.googleusercontent.apps.221850025715-ructeajgl0ud42jh6rr3le5634i7dr4i',
+        },
+      ],
+      // react-native-maps — uses the library's own Expo config plugin (1.18+).
+      // Writes GMSApiKey to Info.plist on iOS and the meta-data key to
+      // AndroidManifest.xml on Android, and injects the correct GoogleMaps
+      // CocoaPod via post-install hook. Replaces the legacy
+      // ios.config.googleMapsApiKey + android.config.googleMaps.apiKey paths
+      // (Expo's legacy path references a pod name `react-native-google-maps`
+      // that no longer exists in r-n-maps 1.27.2 and breaks the iOS build).
+      [
+        'react-native-maps',
+        {
+          iosGoogleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
+          androidGoogleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
         },
       ],
       [
