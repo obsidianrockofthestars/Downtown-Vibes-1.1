@@ -2,7 +2,7 @@ module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
-    version: '1.4.4',
+    version: '1.4.5',
     orientation: 'portrait',
     icon: './assets/images/icon.png',
     scheme: 'vibeathon',
@@ -15,7 +15,14 @@ module.exports = {
     ios: {
       supportsTablet: true,
       bundleIdentifier: 'com.potionsandfamiliars.downtownvibes',
-      buildNumber: '16',
+      buildNumber: '17',
+      // iOS Google Maps key — required by react-native-maps with provider="google"
+      // so Expo prebuild writes GMSServices.provideAPIKey() into AppDelegate.
+      // Without this, iOS map tiles silently fail and the map renders blank.
+      // Note: iOS takes flat googleMapsApiKey; Android takes nested googleMaps.apiKey.
+      config: {
+        googleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
+      },
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
         NSLocationWhenInUseUsageDescription:
@@ -26,7 +33,7 @@ module.exports = {
       },
     },
     android: {
-      versionCode: 16,
+      versionCode: 17,
       adaptiveIcon: {
         backgroundColor: '#6C3AED',
         foregroundImage: './assets/images/icon.png',
