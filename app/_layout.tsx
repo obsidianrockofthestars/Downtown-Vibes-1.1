@@ -9,6 +9,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import { isRunningInExpoGo } from '@/lib/expoGo';
+import { VersionGateModal } from '@/components/VersionGateModal';
 import '../lib/backgroundTasks';
 import { clearDismissedGeofences } from '../lib/backgroundTasks';
 
@@ -62,6 +63,14 @@ function RootInner() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="+not-found" />
       </Stack>
+      {/*
+        Version gate modal — reads public.app_config on mount + on
+        foreground and shows a soft nudge or hard block if the running
+        binary is below the configured minRecommended/minRequired
+        thresholds. See lib/versionGate.ts. Renders null for up-to-date
+        users.
+      */}
+      <VersionGateModal />
     </>
   );
 }
