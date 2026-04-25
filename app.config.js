@@ -2,7 +2,7 @@ module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
-    version: '1.4.5',
+    version: '1.4.6',
     orientation: 'portrait',
     icon: './assets/images/icon.png',
     scheme: 'vibeathon',
@@ -76,7 +76,7 @@ module.exports = {
       [
         'react-native-maps',
         {
-          iosGoogleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
+          iosGoogleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY_IOS || '',
           androidGoogleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY || '',
         },
       ],
