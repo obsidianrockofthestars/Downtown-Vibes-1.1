@@ -75,7 +75,9 @@ async function loadRevenueCatUI() {
 import { useAuth } from '@/context/AuthContext';
 import { isRunningInExpoGo } from '@/lib/expoGo';
 import { supabase } from '@/lib/supabase';
-import { Business, UserRole, isAutoLinkCollisionError } from '@/lib/types';
+import { Business, Post, UserRole, isAutoLinkCollisionError } from '@/lib/types';
+import { useRouter } from 'expo-router';
+import { formatTimeAgo } from '@/lib/formatters';
 import { haversineDistance } from '@/lib/haversine';
 import ProfileScreen from './profile';
 import { OnboardingTutorial } from '@/components/OnboardingTutorial';
@@ -296,6 +298,148 @@ export default function LoginScreen() {
     setIsEditingDesc(false);
   }, [activeBusiness?.id]);
 
+  // 1.5.0 redemption attribution — fetch today's redemption count for the
+  // active business so the owner sees DV-driven foot-traffic data inline.
+  // Refetched whenever the active business changes; pull-to-refresh and
+  // post-save handlers also call this to keep it fresh.
+  // See wiki/redemption-mechanic-spec.md.
+  const [redemptionCount, setRedemptionCount] = useState<number | null>(null);
+  const [redemptionCountLoading, setRedemptionCountLoading] = useState(false);
+
+  // 1.6.0 Downtown Feed Phase 1, Session 3 — recent posts for the active
+  // business so the owner sees their post history inline. Capped at last 30.
+  // See wiki/downtown-feed-build-plan.md.
+  const router = useRouter();
+  const [recentPosts, setRecentPosts] = useState<Post[]>([]);
+  const [recentPostsLoading, setRecentPostsLoading] = useState(false);
+
+  const fetchRecentPosts = useCallback(async (businessId: string) => {
+    setRecentPostsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('posts')
+        .select(
+          'id, business_id, author_user_id, post_type, title, body, photo_url, event_at, is_pinned, pinned_until, created_at, updated_at, deleted_at, hidden_for_moderation'
+        )
+        .eq('business_id', businessId)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+        .limit(30);
+      if (error) {
+        console.warn('recent posts fetch errored:', error);
+        setRecentPosts([]);
+        return;
+      }
+      setRecentPosts((data ?? []) as unknown as Post[]);
+    } catch (err) {
+      console.warn('recent posts fetch threw:', err);
+      setRecentPosts([]);
+    } finally {
+      setRecentPostsLoading(false);
+    }
+  }, []);
+
+  const handleNavigateComposer = useCallback(() => {
+    if (!activeBusiness) return;
+    router.push({
+      pathname: ('/owner/post-composer' as any),
+      params: {
+        businessId: activeBusiness.id,
+        businessName: activeBusiness.business_name,
+      },
+    });
+  }, [activeBusiness, router]);
+
+  const handleEditPost = useCallback(
+    (post: Post) => {
+      if (!activeBusiness) return;
+      const ageMs = Date.now() - new Date(post.created_at).getTime();
+      if (ageMs > 24 * 60 * 60 * 1000) {
+        Alert.alert(
+          'Edit window expired',
+          'Posts can only be edited within 24 hours of posting. You can delete and create a new one if needed.'
+        );
+        return;
+      }
+      router.push({
+        pathname: ('/owner/post-composer' as any),
+        params: {
+          businessId: activeBusiness.id,
+          businessName: activeBusiness.business_name,
+          postId: post.id,
+          initialPostType: post.post_type,
+          initialTitle: post.title ?? '',
+          initialBody: post.body,
+          initialEventAt: post.event_at ?? '',
+        },
+      });
+    },
+    [activeBusiness, router]
+  );
+
+  const handleDeletePost = useCallback(
+    (post: Post) => {
+      Alert.alert(
+        'Delete post?',
+        'This removes it from the Downtown feed. You can post a new one any time.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              const { error } = await supabase
+                .from('posts')
+                .update({ deleted_at: new Date().toISOString() })
+                .eq('id', post.id);
+              if (error) {
+                Alert.alert('Could not delete', error.message);
+                return;
+              }
+              setRecentPosts((prev) => prev.filter((p) => p.id !== post.id));
+            },
+          },
+        ]
+      );
+    },
+    []
+  );
+
+  const fetchRedemptionCount = useCallback(async (businessId: string) => {
+    setRedemptionCountLoading(true);
+    try {
+      // "Today" = since local midnight. Convert to UTC ISO for the query.
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const { count, error } = await supabase
+        .from('flash_sale_redemptions')
+        .select('id', { count: 'exact', head: true })
+        .eq('business_id', businessId)
+        .gte('redeemed_at', startOfDay.toISOString());
+      if (error) {
+        console.warn('redemption count fetch errored:', error);
+        setRedemptionCount(null);
+        return;
+      }
+      setRedemptionCount(count ?? 0);
+    } catch (err) {
+      console.warn('redemption count fetch threw:', err);
+      setRedemptionCount(null);
+    } finally {
+      setRedemptionCountLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!activeBusiness?.id) {
+      setRedemptionCount(null);
+      setRecentPosts([]);
+      return;
+    }
+    fetchRedemptionCount(activeBusiness.id);
+    fetchRecentPosts(activeBusiness.id);
+  }, [activeBusiness?.id, fetchRedemptionCount, fetchRecentPosts]);
+
   // Probe whether the current user has a password (i.e. an `email` identity).
   // Used by the master-password useEffect below and by `requestOwnerGate`
   // later to branch on SSO-only vs password users.
@@ -341,6 +485,28 @@ export default function LoginScreen() {
     return null;
   }, []);
 
+  // 1.5.0 belt-and-suspenders: server-side check of auth.users.encrypted_password
+  // via the public.check_master_password_set() RPC (SECURITY DEFINER, returns
+  // boolean). Used alongside the client-side checkUserHasPassword identity
+  // proxy. If EITHER returns false, the modal fires — defends against any
+  // future Supabase auth-schema change to either side of the equation.
+  // See wiki/master-password-bypass-on-resignup.md.
+  const checkMasterPasswordSetServer = useCallback(async (): Promise<
+    boolean | null
+  > => {
+    try {
+      const { data, error } = await supabase.rpc('check_master_password_set');
+      if (error) {
+        console.warn('check_master_password_set RPC errored:', error);
+        return null;
+      }
+      return data === true;
+    } catch (err) {
+      console.warn('check_master_password_set RPC threw:', err);
+      return null;
+    }
+  }, []);
+
   // Master-password enforcement for SSO-only users.
   //
   // Runs whenever a user session becomes non-null (fresh sign-in OR app
@@ -365,24 +531,39 @@ export default function LoginScreen() {
     if (mpwVisible) return;
     let cancelled = false;
     (async () => {
-      const hasPwd = await checkUserHasPassword();
+      // Belt-and-suspenders: client-side identity proxy + server-side
+      // encrypted_password check. If EITHER explicitly returns false the
+      // modal fires. Both null = transient failures = fall open (existing
+      // behavior — owner-gate `requestOwnerGate` is the secondary safety net).
+      const [hasPwdClient, hasPwdServer] = await Promise.all([
+        checkUserHasPassword(),
+        checkMasterPasswordSetServer(),
+      ]);
       if (cancelled) return;
-      if (hasPwd === false) {
+
+      const explicitlyMissing =
+        hasPwdClient === false || hasPwdServer === false;
+      if (explicitlyMissing) {
         // SSO-only user with no master password. Force set-password flow.
         setMpwValue('');
         setMpwConfirm('');
         setMpwRequired(true);
         setMpwVisible(true);
       }
-      // hasPwd === true → user has password, no action needed.
-      // hasPwd === null → unknown state (network issue); don't force the
-      //   modal on a transient failure. If they try a destructive action,
-      //   `requestOwnerGate` handles the fallback.
+      // either === true and the other not false → user has password, safe.
+      // both null → unknown state (network issue); don't force the
+      //   modal on a transient failure.
     })();
     return () => {
       cancelled = true;
     };
-  }, [user, loading, mpwVisible, checkUserHasPassword]);
+  }, [
+    user,
+    loading,
+    mpwVisible,
+    checkUserHasPassword,
+    checkMasterPasswordSetServer,
+  ]);
 
   const handleSignIn = async () => {
     if (!email || !password) {
@@ -2215,6 +2396,132 @@ export default function LoginScreen() {
               placeholderTextColor="#9CA3AF"
               multiline
             />
+            {activeBusiness?.flash_sale &&
+            activeBusiness.flash_sale.trim() ? (
+              <View style={styles.redemptionCountRow}>
+                <Text style={styles.redemptionCountText}>
+                  {'🎫'} Today&apos;s redemptions:{' '}
+                  {redemptionCountLoading
+                    ? '…'
+                    : (redemptionCount ?? 0)}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+
+          {/* 1.6.0 Downtown Feed Phase 1 — Owner-side post composer entry +
+              recent post history. Only business owners reach this card; the
+              posts RLS policy also enforces auth.uid() = owner_id at INSERT
+              so customer-side users cannot create posts even via deep link. */}
+          <View style={styles.card}>
+            <View style={styles.postsCardHeader}>
+              <Text style={styles.cardLabel}>{'📰'} Downtown Posts</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.postsComposerBtn}
+              activeOpacity={0.85}
+              onPress={handleNavigateComposer}
+              disabled={!activeBusiness}
+            >
+              <Text style={styles.postsComposerBtnText}>
+                {'✏️'} Post to Downtown
+              </Text>
+            </TouchableOpacity>
+
+            {recentPostsLoading ? (
+              <ActivityIndicator
+                style={styles.postsLoading}
+                color="#6C3AED"
+              />
+            ) : recentPosts.length === 0 ? (
+              <Text style={styles.postsEmptyHint}>
+                You haven&apos;t posted yet. Share an event, an update, or
+                introduce a new employee.
+              </Text>
+            ) : (
+              <>
+                <Text style={styles.postsHistoryHeader}>
+                  Recent posts ({recentPosts.length})
+                </Text>
+                {recentPosts.map((p) => {
+                  const typeEmoji =
+                    p.post_type === 'event'
+                      ? '📅'
+                      : p.post_type === 'announcement'
+                        ? '📢'
+                        : p.post_type === 'employee'
+                          ? '👋'
+                          : p.post_type === 'vibe'
+                            ? '✨'
+                            : '📣';
+                  const ageMs =
+                    Date.now() - new Date(p.created_at).getTime();
+                  const editable = ageMs <= 24 * 60 * 60 * 1000;
+                  return (
+                    <View key={p.id} style={styles.postsHistoryRow}>
+                      <Text style={styles.postsHistoryEmoji}>
+                        {typeEmoji}
+                      </Text>
+                      <View style={styles.postsHistoryBodyCol}>
+                        {p.title ? (
+                          <Text
+                            style={styles.postsHistoryTitle}
+                            numberOfLines={1}
+                          >
+                            {p.title}
+                          </Text>
+                        ) : null}
+                        <Text
+                          style={styles.postsHistoryBody}
+                          numberOfLines={2}
+                        >
+                          {p.body}
+                        </Text>
+                        <Text style={styles.postsHistoryTime}>
+                          {formatTimeAgo(p.created_at)}
+                          {editable ? '' : ' · edit window closed'}
+                        </Text>
+                      </View>
+                      <View style={styles.postsHistoryActions}>
+                        <TouchableOpacity
+                          onPress={() => handleEditPost(p)}
+                          style={[
+                            styles.postsHistoryActionBtn,
+                            !editable && styles.postsHistoryActionBtnDim,
+                          ]}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Text
+                            style={[
+                              styles.postsHistoryActionText,
+                              !editable && styles.postsHistoryActionTextDim,
+                            ]}
+                          >
+                            Edit
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={() => handleDeletePost(p)}
+                          style={styles.postsHistoryActionBtn}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Text
+                            style={[
+                              styles.postsHistoryActionText,
+                              styles.postsHistoryActionTextDanger,
+                            ]}
+                          >
+                            Delete
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  );
+                })}
+              </>
+            )}
           </View>
 
           <View style={styles.card}>
@@ -3710,6 +4017,109 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#374151',
     marginBottom: 8,
+  },
+  redemptionCountRow: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  redemptionCountText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#6C3AED',
+  },
+  postsCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  postsComposerBtn: {
+    backgroundColor: '#6C3AED',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  postsComposerBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  postsLoading: {
+    marginTop: 14,
+  },
+  postsEmptyHint: {
+    fontSize: 13,
+    color: '#6B7280',
+    marginTop: 12,
+    lineHeight: 18,
+  },
+  postsHistoryHeader: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6B7280',
+    letterSpacing: 0.4,
+    marginTop: 18,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  postsHistoryRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  postsHistoryEmoji: {
+    fontSize: 18,
+    width: 24,
+    textAlign: 'center',
+    marginTop: 1,
+    marginRight: 4,
+  },
+  postsHistoryBodyCol: {
+    flex: 1,
+    marginRight: 8,
+  },
+  postsHistoryTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  postsHistoryBody: {
+    fontSize: 13,
+    color: '#374151',
+    lineHeight: 18,
+  },
+  postsHistoryTime: {
+    fontSize: 11,
+    color: '#9CA3AF',
+    marginTop: 3,
+  },
+  postsHistoryActions: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  postsHistoryActionBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  postsHistoryActionBtnDim: {
+    opacity: 0.4,
+  },
+  postsHistoryActionText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6C3AED',
+  },
+  postsHistoryActionTextDim: {
+    color: '#9CA3AF',
+  },
+  postsHistoryActionTextDanger: {
+    color: '#DC2626',
   },
   emojiInput: {
     fontSize: 28,

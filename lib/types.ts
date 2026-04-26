@@ -31,6 +31,43 @@ export interface VibeCheck {
   comment: string | null;
 }
 
+// 1.6.0 Downtown Feed — business-side post.
+// See wiki/downtown-feed-spec.md and wiki/downtown-feed-build-plan.md.
+// `business_id` is text to match the actual `businesses.id` type (not uuid).
+export type PostType =
+  | 'event'
+  | 'vibe'
+  | 'update'
+  | 'employee'
+  | 'announcement';
+
+export interface Post {
+  id: string;
+  business_id: string;
+  author_user_id: string | null;
+  post_type: PostType;
+  title: string | null;
+  body: string;
+  photo_url: string | null;
+  event_at: string | null;
+  is_pinned: boolean;
+  pinned_until: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  hidden_for_moderation: boolean;
+  // Joined business fields (not always present — depends on the SELECT)
+  business_name?: string;
+  emoji_icon?: string | null;
+}
+
+export interface PostReaction {
+  post_id: string;
+  user_id: string;
+  reaction: 'heart';
+  created_at: string;
+}
+
 export type UserRole = 'owner' | 'customer';
 
 // Third-party SSO providers we support. Keep this list in sync with the

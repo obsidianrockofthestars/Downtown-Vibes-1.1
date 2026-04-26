@@ -21,6 +21,7 @@ import { supabase } from '@/lib/supabase';
 import { Business, VibeCheck } from '@/lib/types';
 import { useAuth } from '@/context/AuthContext';
 import { matchBlockedWord } from '@/lib/profanityFilter';
+import { RedemptionModal } from './RedemptionModal';
 
 function renderStars(rating: number): string {
   const full = Math.round(rating);
@@ -64,6 +65,11 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
   const [isFavorited, setIsFavorited] = useState(false);
   const [favoriteLoading, setFavoriteLoading] = useState(false);
   const [favoriteRowId, setFavoriteRowId] = useState<string | null>(null);
+
+  // 1.5.0 redemption mechanic — fullscreen modal triggered by the
+  // "🎟️ Redeem at checkout" button that renders below an active flash sale.
+  // See wiki/redemption-mechanic-spec.md.
+  const [showRedemptionModal, setShowRedemptionModal] = useState(false);
 
   useEffect(() => {
     if (selectedBusiness) {
@@ -280,9 +286,37 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
               </Text>
 
               {selectedBusiness.flash_sale ? (
-                <Text style={styles.sheetSale}>
-                  {'\uD83D\uDD25'} {selectedBusiness.flash_sale}
-                </Text>
+                <>
+                  <Text style={styles.sheetSale}>
+                    {'\uD83D\uDD25'} {selectedBusiness.flash_sale}
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.redemptionBtn}
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      if (!user) {
+                        Alert.alert(
+                          'Sign in to redeem',
+                          'Create a free account to claim this discount and let the business know DV sent you.',
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Go to Account',
+                              onPress: () =>
+                                router.push('/(tabs)/account'),
+                            },
+                          ]
+                        );
+                        return;
+                      }
+                      setShowRedemptionModal(true);
+                    }}
+                  >
+                    <Text style={styles.redemptionBtnText}>
+                      {'\uD83C\uDFAB'} Redeem at checkout
+                    </Text>
+                  </TouchableOpacity>
+                </>
               ) : null}
 
               {selectedBusiness.history_fact ? (
@@ -496,6 +530,12 @@ export function BusinessSheet({ selectedBusiness, onDismiss }: BusinessSheetProp
           </TouchableOpacity>
         </View>
       </Modal>
+
+      <RedemptionModal
+        visible={showRedemptionModal}
+        selectedBusiness={selectedBusiness}
+        onClose={() => setShowRedemptionModal(false)}
+      />
     </>
   );
 }
@@ -532,6 +572,22 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#DC2626',
     marginBottom: 4,
+  },
+  redemptionBtn: {
+    width: '100%',
+    backgroundColor: '#6C3AED',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  redemptionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
   sheetFact: {
     fontSize: 14,
