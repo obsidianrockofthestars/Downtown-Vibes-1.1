@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -78,6 +78,8 @@ import { supabase } from '@/lib/supabase';
 import { Business, Post, UserRole, isAutoLinkCollisionError } from '@/lib/types';
 import { useRouter } from 'expo-router';
 import { formatTimeAgo } from '@/lib/formatters';
+import { ShareableEventCard } from '@/components/ShareableEventCard';
+import { shareEventCard } from '@/lib/sharePost';
 import { haversineDistance } from '@/lib/haversine';
 import ProfileScreen from './profile';
 import { OnboardingTutorial } from '@/components/OnboardingTutorial';
@@ -403,6 +405,46 @@ export default function LoginScreen() {
       );
     },
     []
+  );
+
+  // 1.7.0 Option B — image-first social sharing.
+  // Capture the off-screen <ShareableEventCard> as PNG via react-native-view-shot
+  // and hand it to the OS share sheet. Sets shareTarget to mount the card,
+  // waits ~250ms for layout to settle, then captures + shares + clears.
+  // See lib/sharePost.ts and components/ShareableEventCard.tsx.
+  const [shareTarget, setShareTarget] = useState<Post | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const shareCardRef = useRef<View>(null);
+
+  const handleSharePost = useCallback(
+    (post: Post) => {
+      if (!activeBusiness || sharing) return;
+      setSharing(true);
+      setShareTarget(post);
+      // Wait one beat for the off-screen card to mount + layout
+      setTimeout(async () => {
+        try {
+          const result = await shareEventCard({
+            cardRef: shareCardRef,
+            post,
+            businessName: activeBusiness.business_name ?? 'your business',
+          });
+          if (!result.ok) {
+            // Skip the alert for user-cancelled flows; only surface real errors
+            if (
+              result.error !== 'card_not_mounted' &&
+              !/cancel/i.test(result.error)
+            ) {
+              Alert.alert("Couldn't share", result.error);
+            }
+          }
+        } finally {
+          setSharing(false);
+          setShareTarget(null);
+        }
+      }, 280);
+    },
+    [activeBusiness, sharing]
   );
 
   const fetchRedemptionCount = useCallback(async (businessId: string) => {
@@ -2062,10 +2104,23 @@ export default function LoginScreen() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={styles.dashboardHeader}>
-            <Text style={styles.heading}>Owner Dashboard</Text>
-            <Text style={styles.dashboardSubtext}>
-              Each card is one map pin. Tap a card to edit its details below.
-            </Text>
+            <View style={styles.dashboardHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.heading}>Owner Dashboard</Text>
+                <Text style={styles.dashboardSubtext}>
+                  Each card is one map pin. Tap a card to edit its details below.
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.dashboardHelpBtn}
+                onPress={() => setShowOwnerTutorial(true)}
+                activeOpacity={0.7}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                accessibilityLabel="View app tutorial"
+              >
+                <Text style={styles.dashboardHelpBtnText}>?</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           {ownedBusinesses.map((biz) => {
@@ -2484,6 +2539,22 @@ export default function LoginScreen() {
                       </View>
                       <View style={styles.postsHistoryActions}>
                         <TouchableOpacity
+                          onPress={() => handleSharePost(p)}
+                          style={[
+                            styles.postsHistoryActionBtn,
+                            sharing && styles.postsHistoryActionBtnDim,
+                          ]}
+                          disabled={sharing}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Text style={styles.postsHistoryActionText}>
+                            {sharing && shareTarget?.id === p.id
+                              ? '…'
+                              : 'Share'}
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
                           onPress={() => handleEditPost(p)}
                           style={[
                             styles.postsHistoryActionBtn,
@@ -2582,20 +2653,12 @@ export default function LoginScreen() {
             <Text style={styles.helperText}>Shown as a "View Menu" button on your pin</Text>
           </View>
 
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>Website</Text>
-            <TextInput
-              style={styles.input}
-              value={website}
-              onChangeText={setWebsite}
-              placeholder="Website URL (e.g., https://...)"
-              placeholderTextColor="#9CA3AF"
-              keyboardType="url"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Text style={styles.helperText}>Your business website or social page</Text>
-          </View>
+          {/* Website card removed 2026-04-26 per Dylan — Menu Link covers
+              the use case; the dashboard was getting too tall. The website
+              column stays in the businesses table and the `website` state
+              is still hydrated from fetch + saved on submit so any existing
+              data is preserved (just no UI to edit it). Re-add this card
+              if/when needed. */}
 
           <TouchableOpacity
             style={[styles.saveBtn, saving && styles.btnDisabled]}
@@ -2888,6 +2951,31 @@ export default function LoginScreen() {
             visible={showOwnerTutorial}
             onFinish={() => setShowOwnerTutorial(false)}
           />
+
+          {/* Off-screen <ShareableEventCard> for 1.7.0 Option B social
+              sharing. Mounted only when shareTarget is non-null, positioned
+              at top:-10000 so it never appears on screen. shareEventCard()
+              captures this view to a PNG and feeds it to the OS share sheet.
+              See lib/sharePost.ts. */}
+          {shareTarget && activeBusiness ? (
+            <View
+              pointerEvents="none"
+              style={{
+                position: 'absolute',
+                top: -10000,
+                left: 0,
+                opacity: 0,
+              }}
+              collapsable={false}
+            >
+              <ShareableEventCard
+                ref={shareCardRef}
+                post={shareTarget}
+                businessName={activeBusiness.business_name ?? ''}
+                businessEmoji={activeBusiness.emoji_icon}
+              />
+            </View>
+          ) : null}
 
           <StaticPinPickerModal
             visible={!!staticPinPickerTargetId}
@@ -4006,11 +4094,35 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: '#F9FAFB',
     borderRadius: 12,
-    padding: 16,
+    padding: 12,
     marginHorizontal: 20,
-    marginBottom: 16,
+    marginBottom: 8,
     borderWidth: 1,
     borderColor: '#E5E7EB',
+  },
+  // (B) tightened from padding:16/marginBottom:16 → 12/8 — 2026-04-26
+  // dashboard cleanup pass.
+  dashboardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  dashboardHelpBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dashboardHelpBtnText: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#6C3AED',
+    lineHeight: 20,
   },
   cardLabel: {
     fontSize: 14,
