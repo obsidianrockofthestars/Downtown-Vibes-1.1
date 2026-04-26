@@ -1627,6 +1627,76 @@ export default function LoginScreen() {
     }
   };
 
+  // ── Single-tier "pack up for the day" pair ──────────────────────────
+  // Single-tier businesses (food trucks, pop-ups) need a way to disappear
+  // from the map at end of day without deleting their account. We toggle
+  // `is_active` because the map query filters on it (`eq('is_active', true)`).
+  // The owner dashboard query is owner_id-only, so the packed-up business
+  // stays visible to its owner with the reactivate button.
+  const handlePackUpPin = (businessId: string) => {
+    Alert.alert(
+      'Pack up for the day?',
+      'Your business will disappear from the map until you bring it back. Your settings stay saved.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Pack Up',
+          style: 'destructive',
+          onPress: async () => {
+            setUpdatingLocationId(businessId);
+            try {
+              const { error } = await supabase
+                .from('businesses')
+                .update({ is_active: false })
+                .eq('id', businessId);
+
+              if (error) {
+                Alert.alert('Error', error.message);
+                return;
+              }
+
+              setOwnedBusinesses((prev) =>
+                prev.map((b) =>
+                  b.id === businessId ? { ...b, is_active: false } : b
+                )
+              );
+              Alert.alert(
+                'Packed up',
+                'Your business is no longer on the map. Bring it back any time.'
+              );
+            } finally {
+              setUpdatingLocationId(null);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleReactivatePin = async (businessId: string) => {
+    setUpdatingLocationId(businessId);
+    try {
+      const { error } = await supabase
+        .from('businesses')
+        .update({ is_active: true })
+        .eq('id', businessId);
+
+      if (error) {
+        Alert.alert('Error', error.message);
+        return;
+      }
+
+      setOwnedBusinesses((prev) =>
+        prev.map((b) =>
+          b.id === businessId ? { ...b, is_active: true } : b
+        )
+      );
+      Alert.alert("You're back on the map!");
+    } finally {
+      setUpdatingLocationId(null);
+    }
+  };
+
   const openStaticPinPicker = (businessId: string) => {
     const biz = ownedBusinesses.find((b) => b.id === businessId);
     if (!biz) return;
@@ -1949,16 +2019,19 @@ export default function LoginScreen() {
                         📍 Pin Location
                       </Text>
                       <Text style={styles.pinSectionHelp}>
-                        Your business pin on the map.
+                        {biz.is_active === false
+                          ? 'Your business is packed up for the day. Bring it back when you reopen.'
+                          : 'Your business pin on the map.'}
                       </Text>
 
-                      {!biz.is_pin_locked ? (
+                      {biz.is_active === false ? (
+                        // ── Packed-up state: only show the reactivate button ──
                         <TouchableOpacity
                           style={[
                             styles.bizCardUpdatePinBtn,
                             locBusy && styles.btnDisabled,
                           ]}
-                          onPress={() => handleUpdateLocation(biz.id)}
+                          onPress={() => handleReactivatePin(biz.id)}
                           disabled={!!locBusy}
                           activeOpacity={0.85}
                         >
@@ -1966,33 +2039,70 @@ export default function LoginScreen() {
                             <ActivityIndicator color="#FFFFFF" />
                           ) : (
                             <Text style={styles.bizCardUpdatePinBtnText}>
-                              📍 Move to my location
+                              ✅ Bring Back to Map
                             </Text>
                           )}
                         </TouchableOpacity>
-                      ) : null}
+                      ) : (
+                        <>
+                          {!biz.is_pin_locked ? (
+                            <TouchableOpacity
+                              style={[
+                                styles.bizCardUpdatePinBtn,
+                                locBusy && styles.btnDisabled,
+                              ]}
+                              onPress={() => handleUpdateLocation(biz.id)}
+                              disabled={!!locBusy}
+                              activeOpacity={0.85}
+                            >
+                              {locBusy ? (
+                                <ActivityIndicator color="#FFFFFF" />
+                              ) : (
+                                <Text style={styles.bizCardUpdatePinBtnText}>
+                                  📍 Move to my location
+                                </Text>
+                              )}
+                            </TouchableOpacity>
+                          ) : null}
 
-                      <TouchableOpacity
-                        style={[
-                          styles.bizCardLockPinBtn,
-                          !biz.is_pin_locked &&
-                            styles.bizCardActionBtnSpacing,
-                          (pinLockSaving || locBusy) && styles.btnDisabled,
-                        ]}
-                        onPress={() =>
-                          biz.is_pin_locked
-                            ? openUnlockPinModal(biz.id)
-                            : openLockPinModal(biz.id)
-                        }
-                        disabled={pinLockSaving || !!locBusy}
-                        activeOpacity={0.85}
-                      >
-                        <Text style={styles.bizCardLockPinBtnText}>
-                          {biz.is_pin_locked
-                            ? '🔓 Unlock Pin Location'
-                            : '🔒 Lock Pin Location'}
-                        </Text>
-                      </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[
+                              styles.bizCardLockPinBtn,
+                              !biz.is_pin_locked &&
+                                styles.bizCardActionBtnSpacing,
+                              (pinLockSaving || locBusy) && styles.btnDisabled,
+                            ]}
+                            onPress={() =>
+                              biz.is_pin_locked
+                                ? openUnlockPinModal(biz.id)
+                                : openLockPinModal(biz.id)
+                            }
+                            disabled={pinLockSaving || !!locBusy}
+                            activeOpacity={0.85}
+                          >
+                            <Text style={styles.bizCardLockPinBtnText}>
+                              {biz.is_pin_locked
+                                ? '🔓 Unlock Pin Location'
+                                : '🔒 Lock Pin Location'}
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[
+                              styles.bizCardRemoveTravelingBtn,
+                              styles.bizCardActionBtnSpacing,
+                              locBusy && styles.btnDisabled,
+                            ]}
+                            onPress={() => handlePackUpPin(biz.id)}
+                            disabled={!!locBusy}
+                            activeOpacity={0.85}
+                          >
+                            <Text style={styles.bizCardRemoveTravelingBtnText}>
+                              🧹 Remove from Map
+                            </Text>
+                          </TouchableOpacity>
+                        </>
+                      )}
                     </View>
                   )}
 
