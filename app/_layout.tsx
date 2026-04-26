@@ -30,23 +30,17 @@ function RootInner() {
 
   useEffect(() => {
     clearDismissedGeofences();
-
     if (isRunningInExpoGo) {
       console.log('Running in Expo Go: Skipping RevenueCat initialization.');
       return;
     }
-
     Purchases.setLogLevel(LOG_LEVEL.ERROR);
-
     const key = Platform.OS === 'ios' ? RC_APPLE_KEY : RC_GOOGLE_KEY;
-    if (key) {
-      Purchases.configure({ apiKey: key });
-    }
+    if (key) Purchases.configure({ apiKey: key });
   }, []);
 
   useEffect(() => {
     if (isRunningInExpoGo) return;
-
     if (user && user.id !== prevUserId.current) {
       prevUserId.current = user.id;
       Purchases.logIn(user.id).catch(() => {});
@@ -63,13 +57,6 @@ function RootInner() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="+not-found" />
       </Stack>
-      {/*
-        Version gate modal — reads public.app_config on mount + on
-        foreground and shows a soft nudge or hard block if the running
-        binary is below the configured minRecommended/minRequired
-        thresholds. See lib/versionGate.ts. Renders null for up-to-date
-        users.
-      */}
       <VersionGateModal />
     </>
   );
@@ -78,6 +65,10 @@ function RootInner() {
 function RootLayout() {
   const [loaded, error] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
+    BigShoulders: require('../assets/fonts/BigShoulders-Bold.ttf'),
+    'JetBrainsMono-Bold': require('../assets/fonts/JetBrainsMono-Bold.ttf'),
+    'JetBrainsMono-Regular': require('../assets/fonts/JetBrainsMono-Regular.ttf'),
+    Silkscreen: require('../assets/fonts/Silkscreen-Regular.ttf'),
   });
 
   useEffect(() => {
@@ -87,16 +78,11 @@ function RootLayout() {
   useEffect(() => {
     if (loaded) {
       SplashScreen.hideAsync();
-
       (async () => {
-        // Expo Go removed remote push support on Android (SDK 53+).
-        // Avoid loading `expo-notifications` in that environment to prevent crashes.
         const isExpoGoAndroid =
           Platform.OS === 'android' && !!Constants.expoGoConfig;
         if (isExpoGoAndroid) return;
-
         const Notifications = await import('expo-notifications');
-
         Notifications.setNotificationHandler({
           handleNotification: async () => ({
             shouldShowAlert: true,
@@ -106,7 +92,6 @@ function RootLayout() {
             shouldSetBadge: false,
           }),
         });
-
         if (Platform.OS === 'android') {
           await Notifications.setNotificationChannelAsync('default', {
             name: 'default',
@@ -114,7 +99,6 @@ function RootLayout() {
           });
         }
       })().catch((err) => {
-        // Non-fatal; notifications can be disabled in some environments.
         console.warn('Notifications init failed:', err);
       });
     }
