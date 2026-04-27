@@ -115,7 +115,7 @@ export const ShareableEventCard = forwardRef<View, ShareableEventCardProps>(
           <View style={styles.brandTextCol}>
             <Text style={styles.brandName}>Downtown Vibes</Text>
             <Text style={styles.brandSub}>
-              Open in app to see more · downtownvibes.app
+              Open in app to see more · downtownvibes.pages.dev
             </Text>
           </View>
         </View>

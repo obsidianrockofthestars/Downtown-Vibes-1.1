@@ -20,7 +20,7 @@ import { Share, View } from 'react-native';
 import { captureRef } from 'react-native-view-shot';
 import { Post } from './types';
 
-const DV_DEEP_LINK = 'https://downtownvibes.app';
+const DV_DEEP_LINK = 'https://downtownvibes.pages.dev';
 
 function formatEventDateForCaption(iso: string | null | undefined): string | null {
   if (!iso) return null;

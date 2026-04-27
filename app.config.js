@@ -2,7 +2,7 @@ module.exports = {
   expo: {
     name: 'DowntownVibes',
     slug: 'Vibeathon',
-    version: '1.4.6',
+    version: '1.6.0',
     orientation: 'portrait',
     icon: './assets/images/icon.png',
     scheme: 'vibeathon',

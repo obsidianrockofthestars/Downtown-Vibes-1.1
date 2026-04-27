@@ -94,8 +94,12 @@ import {
 } from '@/lib/ownerGate';
 
 const CLAIM_RADIUS_MILES = 0.1;
-const DEEP_LINK =
-  'https://play.google.com/store/apps/details?id=com.potionsandfamiliars.downtownvibes';
+// 2026-04-26 late-evening: switched from direct Play Store URL to the
+// Cloudflare Pages landing site, which auto-redirects mobile users to the
+// correct platform store and shows a branded landing page on desktop. When
+// the custom downtownvibes.app domain is wired to this Pages project, swap
+// this back to https://downtownvibes.app for branding consistency.
+const DEEP_LINK = 'https://downtownvibes.pages.dev';
 
 export default function LoginScreen() {
   const { user, role, loading, signIn, signUp, signOut } = useAuth();
