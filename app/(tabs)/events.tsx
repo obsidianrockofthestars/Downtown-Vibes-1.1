@@ -37,6 +37,8 @@ import { Business, Post, PostType } from '@/lib/types';
 import { haversineDistance } from '@/lib/haversine';
 import { PostCard } from '@/components/PostCard';
 import { BusinessSheet } from '@/components/BusinessSheet';
+import { CyberPressBanner } from '@/components/CyberPressBanner';
+import { CyberPressInfoModal } from '@/components/CyberPressInfoModal';
 import {
   colors as C,
   fonts as F,
@@ -66,7 +68,6 @@ type JoinedBusiness = {
   business_type: string | null;
   flash_sale: string | null;
   description: string | null;
-  history_fact: string | null;
   account_tier: string | null;
 };
 
@@ -100,6 +101,10 @@ export default function EventsBoard() {
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // 1.7.0 — Cyber Press info modal state. Triggered by the banner at top
+  // of the feed and by the "Become a curator" menu entry (wired separately).
+  const [cyberPressModalOpen, setCyberPressModalOpen] = useState(false);
 
   const [selectedBusiness, setSelectedBusiness] = useState<Business | null>(null);
 
@@ -151,17 +156,24 @@ export default function EventsBoard() {
   const fetchPosts = useCallback(async () => {
     setErrorMessage(null);
     try {
+      // Disambiguated embed via the explicit FK constraint name. The posts
+      // table has TWO foreign keys to businesses (business_id_fkey for the
+      // owning business; featured_business_id_fkey for Cyber Press spotlights
+      // — re-added in 1.7). Without the !posts_business_id_fkey hint,
+      // PostgREST raises "more than one relationship was found" — see
+      // wiki/path-c-web-v1.md gotchas + 2026-04-27 evening session log.
       const { data, error } = await supabase
         .from('posts')
         .select(
           `id, business_id, author_user_id, post_type, title, body,
            photo_url, event_at, is_pinned, pinned_until, created_at,
            updated_at, deleted_at, hidden_for_moderation,
-           businesses (
+           featured_business_id,
+           businesses!posts_business_id_fkey (
              id, business_name, emoji_icon, latitude, longitude,
              static_latitude, static_longitude, is_active,
              is_traveling_active, business_type, flash_sale, description,
-             history_fact, account_tier
+             account_tier
            )`
         )
         .is('deleted_at', null)
@@ -320,7 +332,7 @@ export default function EventsBoard() {
         business_type: match.business.business_type ?? '',
         menu_link: null, website: null,
         description: match.business.description ?? null,
-        history_fact: match.business.history_fact ?? null,
+        history_fact: null,
       };
       setSelectedBusiness(biz);
     },
@@ -356,6 +368,9 @@ export default function EventsBoard() {
         </View>
         <View style={styles.titleUnderline} />
       </View>
+
+      {/* CYBER PRESS BANNER — 1.7.0 awareness surface, dismissable */}
+      <CyberPressBanner onPress={() => setCyberPressModalOpen(true)} />
 
       {/* RADIUS */}
       <View style={styles.controlBlock}>
@@ -477,6 +492,11 @@ export default function EventsBoard() {
       <BusinessSheet
         selectedBusiness={selectedBusiness}
         onDismiss={() => setSelectedBusiness(null)}
+      />
+
+      <CyberPressInfoModal
+        visible={cyberPressModalOpen}
+        onClose={() => setCyberPressModalOpen(false)}
       />
     </View>
   );

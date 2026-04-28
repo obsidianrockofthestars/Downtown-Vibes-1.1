@@ -89,30 +89,38 @@ export function FilterPanel({
           },
         ]}
       >
-        {/* Watermark — "Powered by Potions and Familiars" lockup sits quietly
-            behind all content at 0.05 opacity. Modal only; never on the map. */}
-        <View pointerEvents="none" style={{ position: 'absolute', bottom: 0, right: -40, zIndex: 0 }}>
-          <Image
-            source={require('@/assets/images/watermark.png')}
-            style={{ width: 250, height: 250, opacity: 0.05, resizeMode: 'contain' }}
-          />
-        </View>
-
-        {/* Downtown Vibes icon — bottom-left of the modal, ONLY when the menu
-            is open. Kept off the map per Dylan's UX note. Positioned above the
-            safe-area bottom inset so it clears the tab bar on notched devices. */}
+        {/* Branding text — bottom-LEFT of the modal — "Downtown Vibes" /
+            "By Potions And Familiars LLC". Per Dylan's UX feedback 2026-04-26
+            referencing the second mockup. */}
         <View
           pointerEvents="none"
           style={{
             position: 'absolute',
-            bottom: Math.max(insets.bottom, 16) + 4,
-            left: 12,
+            bottom: Math.max(insets.bottom, 16),
+            left: 16,
+            zIndex: 1,
+          }}
+        >
+          <Text style={styles.brandingTitle}>Downtown Vibes</Text>
+          <Text style={styles.brandingSubtitle}>
+            By Potions And Familiars LLC
+          </Text>
+        </View>
+
+        {/* Cyborg-rider icon — bottom-RIGHT of the modal. The brand mark from
+            assets/images/icon.png. Companion to the bottom-left branding text. */}
+        <View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            bottom: Math.max(insets.bottom, 16),
+            right: 16,
             zIndex: 1,
           }}
         >
           <Image
             source={require('@/assets/images/icon.png')}
-            style={{ width: 44, height: 44, borderRadius: 10 }}
+            style={{ width: 60, height: 60, borderRadius: 12 }}
             resizeMode="contain"
           />
         </View>
@@ -261,12 +269,9 @@ export function FilterPanel({
         )}
 
         <View style={styles.categoryGrid}>
-          <View pointerEvents="none" style={[StyleSheet.absoluteFillObject]}>
-            <Image
-              source={require('@/assets/images/watermark.png')}
-              style={{ width: '100%', height: '100%', opacity: 0.05, resizeMode: 'cover' }}
-            />
-          </View>
+          {/* Inner watermark removed 2026-04-26 — it was visually competing with
+              the new bottom branding lockup. Category chips now sit on a clean
+              background. */}
           {CATEGORIES.map((cat) => {
             const active = activeFilters.includes(cat);
             const colors = CHIP_COLORS[cat];
@@ -491,6 +496,19 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
     color: '#111827',
+  },
+  brandingTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#111827',
+    letterSpacing: 0.2,
+  },
+  brandingSubtitle: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#6B7280',
+    letterSpacing: 0.3,
+    marginTop: 2,
   },
   iconCloseButton: {
     width: 36,

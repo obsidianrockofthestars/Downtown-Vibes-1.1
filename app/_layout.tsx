@@ -10,6 +10,8 @@ import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import { isRunningInExpoGo } from '@/lib/expoGo';
 import { VersionGateModal } from '@/components/VersionGateModal';
+import { WelcomeOnboardingModal } from '@/components/WelcomeOnboardingModal';
+import { WhatsNewModal } from '@/components/WhatsNewModal';
 import '../lib/backgroundTasks';
 import { clearDismissedGeofences } from '../lib/backgroundTasks';
 
@@ -58,6 +60,8 @@ function RootInner() {
         <Stack.Screen name="+not-found" />
       </Stack>
       <VersionGateModal />
+      <WelcomeOnboardingModal />
+      <WhatsNewModal />
     </>
   );
 }
